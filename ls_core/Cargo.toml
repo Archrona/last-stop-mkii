@@ -1,5 +1,5 @@
 [package]
-name = "ls-core"
+name = "ls_core"
 version = "0.1.0"
 authors = ["mame <mamecccci@gmail.com>"]
 edition = "2018"

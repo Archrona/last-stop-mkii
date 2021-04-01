@@ -9,7 +9,7 @@ export default class Core {
 
     async loadCore() {
         try {
-            this.core = await import('ls-core');
+            this.core = await import('ls_core');
 
             console.log(this.core.dbl(10));
             console.log(this.core.dbl(36));
