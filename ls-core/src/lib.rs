@@ -3,12 +3,6 @@ mod utils;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
-extern {
-    fn alert(s: &str);
+pub fn dbl(x: f64) -> f64 {
+    return x * 2.0;
 }
-
-#[wasm_bindgen]
-pub fn greet() {
-    alert("Hello, {{project-name}}!");
-}
-
