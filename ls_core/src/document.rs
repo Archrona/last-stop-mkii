@@ -59,6 +59,23 @@ pub struct Range {
     pub ending: Position
 }
 
+/// An indentation policy (spaces or tabs-and-spaces) and a tab width.
+///
+/// # Limitations
+/// At the moment, [`Indentation`] is not able to represent the variable
+/// tab widths which sometimes occur in languages like Haskell where
+/// it is customary to align multi-line elements based on the contents
+/// of the lines rather than a fixed-width tab size. 
+///
+/// In short, it makes sense to limit [`Indentation`] to representations which
+/// do not require semantic knowledge about particular languages.
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct Indentation {
+    pub use_spaces: bool,
+    pub spaces_per_tab: usize
+}
+
+
 /// A reification of a reversible modification to a [`Document`].
 ///
 /// When a change is **applied**, the document is modified and the inverse
@@ -121,6 +138,131 @@ pub struct Document {
 
 //-----------------------------------------------------------------------------
 
+impl Indentation {
+    /// Returns an all-spaces indentation policy with each tab level `count`
+    /// spaces apart.
+    ///
+    /// # Panics
+    /// Panics if `count` is 0.
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// let indent = Indentation::spaces(3);
+    /// assert_eq!(indent.produce(6), "      ");
+    /// ```
+    pub fn spaces(count: usize) -> Indentation {
+        if count == 0 {
+            panic!("Invalid indentation - must have non-zero spaces per indent");
+        }
+
+        Indentation {
+            use_spaces: true,
+            spaces_per_tab: count
+        }
+    }
+    
+    /// Returns a tabs-and-spaces indentation policy with each tab taking up
+    /// `spaces_per_tab` spaces. If tabs and spaces are mixed, each tab is
+    /// assumed to be equivalent to `spaces_per_tab` spaces, and margins
+    /// produced by this `Indentation` start with as many tabs as possible and
+    /// then wrap up the remainder with spaces.
+    ///
+    /// # Panics
+    /// Panics if `spaces_per_tab` is 0.
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// let indent = Indentation::tabs(3);
+    /// assert_eq!(indent.produce(6), "\t\t");
+    /// assert_eq!(indent.produce(11), "\t\t\t  ");
+    /// ```
+    pub fn tabs(spaces_per_tab: usize) -> Indentation {
+        if spaces_per_tab == 0 {
+            panic!("Invalid indentation - must have non-zero spaces per tab");
+        }
+
+        Indentation {
+            use_spaces: false,
+            spaces_per_tab
+        }
+    }
+    
+    /// Returns `(spaces, bytes)` where `spaces` is the number of *logical spaces*
+    /// in the left margin's whitespace (spaces count as 1, tabs count as `self.spaces_per_tab`),
+    /// and `bytes` is the number of bytes that make up the left margin in `line`.
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// let indent = Indentation::spaces(2);
+    /// assert_eq!(indent.measure("    "), (4, 4));
+    /// assert_eq!(indent.measure("\t\t Hello \t there"), (5, 3));
+    /// ```
+    pub fn measure(&self, line: &str) -> (usize, usize) {
+        let mut spaces: usize = 0;
+        
+        for (byte, c) in line.char_indices() {
+            if c == ' ' {
+                spaces += 1;
+            } else if c == '\t' {
+                spaces += self.spaces_per_tab;
+            } else {
+                return (spaces, byte);
+            }
+        }
+        
+        (spaces, line.len())
+    }
+
+    /// Returns the white space for a left margin with visual width of `spaces` spaces
+    /// using either spaces or tabs-and-spaces.
+    ///
+    /// If this `Indentation` uses tabs and the requested number of spaces is not a
+    /// multiple of `spaces_per_tab`, spaces will be used to complete the left margin.
+    pub fn produce(&self, spaces: usize) -> String {
+        if self.use_spaces {
+            " ".repeat(spaces)
+        } else {
+            "\t".repeat(spaces / self.spaces_per_tab) + &" ".repeat(spaces % self.spaces_per_tab)
+        }
+    }
+
+    /// Returns `line` indented by `indent_delta` tab stops.
+    /// 
+    /// If `indent_delta` is negative, this performs a dedent.
+    /// If the dedent would reach past the left margin, `indent` returns an empty (zero-space)
+    /// margin.
+    ///
+    /// If `include_content` is false, only return the left margin of `line` - omit the content
+    /// that comes after it.
+    ///
+    /// ```
+    /// use ls_core::document::*;
+    /// assert_eq!(Indentation::spaces(4).indent("    Hello", -1, true), "Hello");
+    /// assert_eq!(Indentation::spaces(4).indent("    Hello", -1, false), "");
+    /// assert_eq!(Indentation::spaces(4).indent("    Hello", 1, true), "        Hello");
+    /// assert_eq!(Indentation::spaces(4).indent("    Hello", 1, false), "        ");
+    /// assert_eq!(Indentation::tabs(4).indent("     Hello", -1, true), " Hello");
+    /// assert_eq!(Indentation::tabs(4).indent("     Hello", -1, false), " ");
+    /// assert_eq!(Indentation::tabs(4).indent("     Hello", 1, true), "\t\t Hello");
+    /// assert_eq!(Indentation::tabs(4).indent("     Hello", 1, false), "\t\t ");
+    /// ```
+    pub fn indent(&self, line: &str, indent_delta: isize, include_content: bool) -> String {
+        let (spaces, bytes) = self.measure(line);
+        let requested_spaces: isize = (spaces as isize) + indent_delta * (self.spaces_per_tab as isize);
+        let actual_spaces: usize = if requested_spaces < 0 { 0 } else { requested_spaces as usize };
+        
+        let mut result = self.produce(actual_spaces);
+        if include_content {
+            result += &line[bytes..];
+        }
+        
+        result
+    }
+}
+
 impl Anchor {
     /// The index of the cursor in a document's anchor list.
     pub const CURSOR: usize = 0;
@@ -174,6 +316,7 @@ impl Document {
         Document {
             lines: vec![String::new()],
             anchors: vec![Anchor::default(), Anchor::default()],
+            indentation: Indentation::spaces(4),
             undo_buffer: Vec::new(),
             redo_buffer: Vec::new()
         }
@@ -184,7 +327,7 @@ impl Document {
     /// and initializes them both to (0, 0).
     ///
     /// The resulting document is guaranteed to have at least one line, even if it is
-    /// just the empty line. Trailing newlines are stripped and the final empty line
+    /// just the empty line. Trailing newlines are stripped ainnd the final empty line
     /// is not included.
     ///
     /// # Examples
@@ -213,6 +356,7 @@ impl Document {
         Document {
             lines,
             anchors: vec![Anchor::default(), Anchor::default()],
+            indentation: Indentation::spaces(4),
             undo_buffer: Vec::new(),
             redo_buffer: Vec::new()
         }
