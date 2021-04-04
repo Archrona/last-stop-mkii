@@ -481,19 +481,49 @@ impl Document {
 
     /// Returns the range as a single string with lines separated by "\n",
     /// or None if the range is invalid.
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// let document = Document::from("Hello\nthere\ncaptain!");
+    /// assert_eq!(document.text_range(&Range::from(0, 0, 0, 0)), Some("".to_string()));
+    /// assert_eq!(document.text_range(&Range::from(0, 0, 0, 1)), Some("H".to_string()));
+    /// assert_eq!(document.text_range(&Range::from(0, 2, 0, 5)), Some("llo".to_string()));
+    /// assert_eq!(document.text_range(&Range::from(0, 0, 1, 0)), Some("Hello\n".to_string()));
+    /// assert_eq!(document.text_range(&Range::from(0, 2, 2, 3)), Some("llo\nthere\ncap".to_string()));
+    /// assert_eq!(document.text_range(&Range::from(0, 5, 1, 0)), Some("\n".to_string()));
+    /// assert_eq!(document.text_range(&Range::from(0, 0, 0, 10)), None);
+    /// assert_eq!(document.text_range(&Range::from(1, 1, 0, 2)), None);    
+    /// ```
     pub fn text_range(&self, range: &Range) -> Option<String> {
-        // if self.range_valid(range) {
-        //     if range.beginning.row == range.ending.row {
-                
-        //     }
-        // } else {
-        //     None
-        // }
-        todo!();
+        if !self.range_valid(range) {
+            None
+        } else {
+            let mut s = String::new();
+
+            if range.beginning.row == range.ending.row {
+                s.extend(
+                    self.lines[range.beginning.row][range.beginning.column..range.ending.column]
+                    .iter()
+                );
+            } else {
+                s.extend(self.lines[range.beginning.row][range.beginning.column..].iter());
+
+                for line in self.lines[(range.beginning.row + 1)..range.ending.row].iter() {
+                    s += "\n";
+                    s.extend(line.iter());
+                }
+
+                s += "\n";
+                s.extend(self.lines[range.ending.row][..range.ending.column].iter());
+            }
+
+            Some(s)
+        }
     }
 
 
-
+    
     /// Inserts `text`, a list of one or more lines, into the document at `position`.
     /// Returns the `Change` which would undo this modification.
     /// 
