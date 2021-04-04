@@ -359,7 +359,7 @@ impl Document {
             text.lines().map(|x| String::from(x)).collect()
         };
 
-        Document {
+        Document { 
             lines,
             anchors: vec![Anchor::default(), Anchor::default()],
             indentation: Indentation::spaces(4),
@@ -382,6 +382,33 @@ impl Document {
     /// ```
     pub fn position_valid(&self, position: &Position) -> bool {
         position.row < self.lines.len() && position.column <= self.lines[position.row].len()
+    }
+
+    /// Returns whether `range` is legal in this document. Both its beginning and new and
+    /// ending positions must be in range, and its beginning cannot come after its ending.
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// let document = Document::from("Hello\n  there!\n");
+    ///
+    /// let p_1 = Position { row: 0, column: 0 };
+    /// let p_2 = Position { row: 0, column: 5 };
+    /// let p_3 = Position { row: 0, column: 6 };
+    /// let p_4 = Position { row: 1, column: 2 };
+    /// let p_5 = Position { row: 2, column: 0 };
+    /// 
+    /// assert_eq!(true, document.range_valid(&Range { beginning: p_1, ending: p_1 }));
+    /// assert_eq!(true, document.range_valid(&Range { beginning: p_1, ending: p_4 }));
+    /// assert_eq!(true, document.range_valid(&Range { beginning: p_2, ending: p_4 }));
+    /// assert_eq!(false, document.range_valid(&Range { beginning: p_2, ending: p_1 }));
+    /// assert_eq!(false, document.range_valid(&Range { beginning: p_2, ending: p_3 }));
+    /// assert_eq!(false, document.range_valid(&Range { beginning: p_5, ending: p_5 }));
+    /// ```
+    pub fn range_valid(&self, range: &Range) -> bool {
+        self.position_valid(&range.beginning) 
+            && self.position_valid(&range.ending) 
+            && range.beginning <= range.ending
     }
 
     /// Returns the text of the document as a list of lines. This is guaranteed to contain
@@ -417,13 +444,27 @@ impl Document {
         (self.undo_buffer.len(), self.redo_buffer.len())
     }
 
+    /// Returns the document as a single string with lines separated by "\n".
+    pub fn text(&self) -> String {
+        self.lines.join("\n")
+    }
 
 
 
+
+    /// Inserts `text`, a list of one or more lines, into the document at `position`.
+    /// Returns the `Change` which would undo this modification.
+    /// 
+    /// This does not process escapes, indentation, spacing, or capitalization.
+    /// The *only* thing it does is insert exactly what it is told to.
+    ///
+    /// # Panics
+    /// Panics if asked to insert 0 lines or if `position` is out of range.
     fn insert_untracked(&mut self, text: &Vec<String>, position: &Position) -> Change {
         if text.len() == 0 {
             panic!("cannot insert 0 lines");
         }
+        self.assert_position_valid(position);
 
         let before = self.lines[position.row].chars().take(position.column).collect::<String>();
         let after = self.lines[position.row].chars().skip(position.column).collect::<String>();
@@ -432,6 +473,9 @@ impl Document {
             self.lines[position.row] = before + &text[0] + &after;
         } else {
             self.lines[position.row] = before + &text[0];
+
+            push_all_at(&mut self.lines, position.row + 1, &text[1..]);
+            self.lines[position.row + text.len() - 1] += &after;
         }
 
         Change::Remove { range: Range {
@@ -443,6 +487,13 @@ impl Document {
         }}
     }
     
+    /// Removes the text at `range`.
+    /// Returns the `Change` which would undo this modification.
+    ///
+    /// This does not process escapes, indentation, spacing, or capitalization.
+    ///
+    /// # Panics
+    /// Panics if `range` is invalid (out of bounds, reversed).
     fn remove_untracked(&mut self, range: &Range) -> Change {
         todo!();
     }
@@ -456,8 +507,7 @@ impl Document {
         if index >= self.anchors.len() {
             panic!("set_anchor_untracked: invalid index {}", index);
         }
-
-        // TODO: Check validity of anchor
+        self.assert_position_valid(&value.position);
         
         let orig_value = self.anchors[index];
         self.anchors[index] = *value;
@@ -472,13 +522,12 @@ impl Document {
     /// new anchors can be inserted before index 2.
     ///
     /// # Panics
-    /// Panics if index is out of range or if the anchor points to an invalid position.
+    /// Panics if `index` is out of range or if the anchor points to an invalid position.
     fn insert_anchor_untracked(&mut self, index: usize, value: &Anchor) -> Change {
         if index < 2 || index > self.anchors.len() {
             panic!("insert_anchor_untracked: invalid index {}", index);
         }
-
-        // TODO: Check validity of anchor
+        self.assert_position_valid(&value.position);
         
         self.anchors.insert(index, *value);
 
@@ -492,13 +541,11 @@ impl Document {
     /// new anchors can be inserted before index 2.
     ///
     /// # Panics
-    /// Panics if index is out of range or if the anchor points to an invalid position.
+    /// Panics if `index` is out of range.
     fn remove_anchor_untracked(&mut self, index: usize) -> Change {
         if index < 2 || index >= self.anchors.len() {
             panic!("remove_anchor_untracked: invalid index {}", index);
         }
-        
-        // TODO: Check validity of anchor
         
         let orig_value = self.anchors[index];
         self.anchors.remove(index);
@@ -514,6 +561,22 @@ impl Document {
         reverse
     }
 
+    /// Asserts that a position is valid.
+    ///
+    /// # Panics
+    /// Panics if `position` is out of bounds.
+    fn assert_position_valid(&self, position: &Position) -> () {
+        assert!(self.position_valid(position));
+    }
+
+    /// Asserts that a range is valid (start and end positions are both valid,
+    /// start does not come after end.)
+    ///
+    /// # Panics
+    /// Panics if `range` is invalid.
+    fn assert_range_valid(&self, range: &Range) -> () {
+        assert!(self.range_valid(range));
+    }
 }
 
 /// Pushes all items from `s` into `v` starting at index `offset`.
@@ -599,5 +662,34 @@ mod tests {
                 position: Position { row: 1, column: 3 }
             }
         });
+    }
+
+    #[test]
+    fn insert_untracked() {
+        let mut document = Document::from("AAA\nBBB");
+        
+        assert_eq!(document.insert_untracked(
+            &vec![String::from("hello")],
+            &Position { row: 0, column: 0 }
+        ), Change::Remove { range: Range {
+            beginning: Position { row: 0, column: 0 },
+            ending: Position { row: 0, column: 5 }
+        }});
+        assert_eq!(document.text(), "helloAAA\nBBB");
+        
+        assert_eq!(document.insert_untracked(
+            &vec![String::from("there"), String::from("friend")],
+            &Position { row: 1, column: 2 }
+        ), Change::Remove { range: Range {
+            beginning: Position { row: 1, column: 2 },
+            ending: Position { row: 2, column: 6 }
+        }});
+        assert_eq!(document.text(), "helloAAA\nBBthere\nfriendB");
+
+        document.insert_untracked(
+            &vec![String::from("ly")],
+            &Position { row: 2, column: 7 }
+        );
+        assert_eq!(document.text(), "helloAAA\nBBthere\nfriendBly");
     }
 }
