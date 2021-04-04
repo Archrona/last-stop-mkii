@@ -3,8 +3,7 @@
 //! Supports advanced language features, parsing, and many other useful features
 //! that enable speech coding.
 
-
-
+use crate::oops::Oops;
 
 //-----------------------------------------------------------------------------
 
@@ -127,6 +126,23 @@ pub struct ChangePacket {
     changes: Vec<Change>
 }
 
+
+
+pub struct InsertOptions {
+    escapes: bool,
+    indent: bool,
+    spacing: bool,
+    range: Option<Range>
+}
+
+
+
+pub struct RemoveOptions {
+    range: Option<Range>
+}
+
+pub type AnchorHandle = usize;
+
 /// A buffer of text organized into lines. Equipped with undo, redo, and anchors.
 /// The top-level struct for this module.
 ///
@@ -168,6 +184,14 @@ impl Range {
         Range {
             beginning: Position::from(start_row, start_column),
             ending: Position::from(end_row, end_column)
+        }
+    }
+}
+
+impl ChangePacket {
+    pub fn new() -> ChangePacket {
+        ChangePacket {
+            changes: vec![]
         }
     }
 }
@@ -315,7 +339,7 @@ impl Change {
     /// This module is responsible for ensuring that changes will not
     /// violate these invariants. If they do, it is a bug in our code,
     /// not the client code.
-    fn apply(&self, document: &mut Document) -> Change {
+    fn apply_untracked(&self, document: &mut Document) -> Change {
         use Change::*;
     
         match self {
@@ -352,8 +376,8 @@ impl Document {
             lines: vec![vec![]],
             anchors: vec![Anchor::default(), Anchor::default()],
             indentation: Indentation::spaces(4),
-            undo_buffer: Vec::new(),
-            redo_buffer: Vec::new()
+            undo_buffer: vec![],
+            redo_buffer: vec![]
         }
     }
 
@@ -392,8 +416,8 @@ impl Document {
             lines,
             anchors: vec![Anchor::default(), Anchor::default()],
             indentation: Indentation::spaces(4),
-            undo_buffer: Vec::new(),
-            redo_buffer: Vec::new()
+            undo_buffer: vec![],
+            redo_buffer: vec![]
         }
     }
 
@@ -561,6 +585,31 @@ impl Document {
             Some(s)
         }
     }
+
+
+
+    pub fn insert(&mut self, text: &String, options: &InsertOptions) -> Result<(), Oops> {
+        todo!();
+    }
+        
+    pub fn remove(&mut self, options: &RemoveOptions) -> Result<(), Oops> {
+        todo!();
+    }
+    
+    pub fn set_anchor_position(&mut self, index: usize, position: &Position) -> Result<(), Oops> {
+        todo!();
+    }
+    
+    pub fn create_anchor(&mut self, position: &Position) -> Result<AnchorHandle, Oops> {
+        todo!();
+    }
+    
+    
+
+
+
+
+
 
 
     
@@ -800,7 +849,7 @@ mod tests {
         assert_eq!(document.anchor(2).unwrap().position, Position { row: 1, column: 3 });
         assert_eq!(inverse, Change::AnchorRemove { index: 2 });
 
-        let inverse_2 = inverse.apply(&mut document);
+        let inverse_2 = inverse.apply_untracked(&mut document);
 
         assert_eq!(document.anchors().len(), 2);
         assert_eq!(inverse_2, Change::AnchorInsert {
@@ -863,10 +912,10 @@ mod tests {
         let chg_2 = document.remove_untracked(&Range::from(1, 6, 2, 3));
         assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻📲💻⌨️\n매우 짜증나");
 
-        chg_2.apply(&mut document);
+        chg_2.apply_untracked(&mut document);
         assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻✋🏻🖖🏻👌🏻\n⌚️📱📲💻⌨️\n매우 짜증나");
 
-        chg.apply(&mut document);
+        chg.apply_untracked(&mut document);
         assert_eq!(document.text(), "🙈我爱unicode🦄\n매우 짜증나");
     }
 
