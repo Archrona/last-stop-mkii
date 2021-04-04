@@ -69,7 +69,7 @@ pub struct Range {
 ///
 /// In short, it makes sense to limit [`Indentation`] to representations which
 /// do not require semantic knowledge about particular languages.
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct Indentation {
     pub use_spaces: bool,
     pub spaces_per_tab: usize
@@ -93,8 +93,9 @@ pub struct Indentation {
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum Change {
 
-    /// Represents inserting `text` at `position`.
-    Insert { text: String, position: Position },
+    /// Represents inserting `text` at `position` - literally, no escapes,
+    /// exactly the characters that get inserted.
+    Insert { text: Vec<String>, position: Position },
 
     /// Represents removing the text within `range`.
     Remove { range: Range },
@@ -109,7 +110,10 @@ pub enum Change {
 
     /// Represents removing the anchor at `index`, shifting subsequent
     /// anchors to the left by one.
-    AnchorRemove { index: usize }
+    AnchorRemove { index: usize },
+
+    /// Represents a change to the indentation policy.
+    IndentationChange { value: Indentation }
 }
 
 /// A series of [`Change`] to be applied as a group.
@@ -130,6 +134,7 @@ pub struct ChangePacket {
 pub struct Document {
     lines: Vec<String>,
     anchors: Vec<Anchor>,
+    indentation: Indentation,
     undo_buffer: Vec<ChangePacket>,
     redo_buffer: Vec<ChangePacket>
 }
@@ -139,7 +144,7 @@ pub struct Document {
 //-----------------------------------------------------------------------------
 
 impl Indentation {
-    /// Returns an all-spaces indentation policy with each tab level `count`
+    /// Returns an all-spaces indentation poli6cy with each tab level `count`
     /// spaces apart.
     ///
     /// # Panics
@@ -289,7 +294,8 @@ impl Change {
             Remove { range } =>                 document.remove_untracked(range),
             AnchorSet { index, value } =>       document.set_anchor_untracked(*index, value),
             AnchorInsert { index, value } =>    document.insert_anchor_untracked(*index, value),
-            AnchorRemove { index } =>           document.remove_anchor_untracked(*index)
+            AnchorRemove { index } =>           document.remove_anchor_untracked(*index),
+            IndentationChange { value } =>      document.set_indentation_untracked(value)
         }
     }
     
@@ -414,8 +420,27 @@ impl Document {
 
 
 
-    fn insert_untracked(&mut self, text: &str, position: &Position) -> Change {
-        todo!();
+    fn insert_untracked(&mut self, text: &Vec<String>, position: &Position) -> Change {
+        if text.len() == 0 {
+            panic!("cannot insert 0 lines");
+        }
+
+        let before = self.lines[position.row].chars().take(position.column).collect::<String>();
+        let after = self.lines[position.row].chars().skip(position.column).collect::<String>();
+
+        if text.len() == 1 {
+            self.lines[position.row] = before + &text[0] + &after;
+        } else {
+            self.lines[position.row] = before + &text[0];
+        }
+
+        Change::Remove { range: Range {
+            beginning: *position,
+            ending: Position { 
+                row: position.row + text.len() - 1,
+                column: text[text.len() - 1].len()
+            }
+        }}
     }
     
     fn remove_untracked(&mut self, range: &Range) -> Change {
@@ -431,6 +456,8 @@ impl Document {
         if index >= self.anchors.len() {
             panic!("set_anchor_untracked: invalid index {}", index);
         }
+
+        // TODO: Check validity of anchor
         
         let orig_value = self.anchors[index];
         self.anchors[index] = *value;
@@ -450,6 +477,8 @@ impl Document {
         if index < 2 || index > self.anchors.len() {
             panic!("insert_anchor_untracked: invalid index {}", index);
         }
+
+        // TODO: Check validity of anchor
         
         self.anchors.insert(index, *value);
 
@@ -469,14 +498,63 @@ impl Document {
             panic!("remove_anchor_untracked: invalid index {}", index);
         }
         
+        // TODO: Check validity of anchor
+        
         let orig_value = self.anchors[index];
         self.anchors.remove(index);
         
         Change::AnchorInsert { index, value: orig_value }     
     }
 
+    /// Sets the indentation policy.
+    fn set_indentation_untracked(&mut self, value: &Indentation) -> Change {
+        let reverse = Change::IndentationChange { value: self.indentation };
+        self.indentation = *value;
+        
+        reverse
+    }
 
 }
+
+/// Pushes all items from `s` into `v` starting at index `offset`.
+///
+/// `v` must contain items with trait Clone and Default. This uses
+/// a *somewhat* efficient O(n) method via `Vec::swap`.
+///
+/// Author: swizard ([https://stackoverflow.com/a/28687253])
+///
+/// # Examples
+/// ```
+/// use ls_core::document::*;
+/// let mut items = vec![3, 7, 1];
+/// push_all_at(&mut items, 0, &[0, 2]);
+/// assert_eq!(items, &[0, 2, 3, 7, 1]);
+/// push_all_at(&mut items, 0, &[]);
+/// assert_eq!(items, &[0, 2, 3, 7, 1]);
+/// push_all_at(&mut items, 3, &[10, 11]);
+/// assert_eq!(items, &[0, 2, 3, 10, 11, 7, 1]);
+/// push_all_at(&mut items, 7, &[12, 13]);
+/// assert_eq!(items, &[0, 2, 3, 10, 11, 7, 1, 12, 13]);
+/// ```
+pub fn push_all_at<T>(v: &mut Vec<T>, mut offset: usize, s: &[T]) where T: Clone + Default {
+    match (v.len(), s.len()) {
+        (_, 0) => (),
+        (0, _) => { v.append(&mut s.to_owned()); },
+        (_, _) => {
+            assert!(offset <= v.len());
+            let pad = s.len() - ((v.len() - offset) % s.len());
+            v.extend(std::iter::repeat(Default::default()).take(pad));
+            v.append(&mut s.to_owned());
+            let total = v.len();
+            while total - offset >= s.len() {
+                for i in 0 .. s.len() { v.swap(offset + i, total - s.len() + i); }
+                offset += s.len();
+            }
+            v.truncate(total - pad);
+        },
+    }
+}
+
 
 
 //-----------------------------------------------------------------------------
