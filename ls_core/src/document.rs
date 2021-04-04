@@ -10,7 +10,9 @@
 
 /// A row-column position in a [`Document`].
 /// 
-/// Positions are indexed from 0. Tabs count for 1 character. For this reason,
+/// Positions are indexed from 0. All unicode codepoints count for 1 character.
+/// Emojis like 👋🏻 are two codepoints (0x1F44B, 0x1F3FB), and take up two 
+/// logical columns. Tabs are one codepoint. For this reason,
 /// the *visual* position of text on screen is not necessarily the same as
 /// the row and column in the document.
 ///
@@ -95,7 +97,7 @@ pub enum Change {
 
     /// Represents inserting `text` at `position` - literally, no escapes,
     /// exactly the characters that get inserted.
-    Insert { text: Vec<String>, position: Position },
+    Insert { text: Vec<Vec<char>>, position: Position },
 
     /// Represents removing the text within `range`.
     Remove { range: Range },
@@ -132,7 +134,7 @@ pub struct ChangePacket {
 /// to spend much of their time working with this type.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Document {
-    lines: Vec<String>,
+    lines: Vec<Vec<char>>,
     anchors: Vec<Anchor>,
     indentation: Indentation,
     undo_buffer: Vec<ChangePacket>,
@@ -142,6 +144,33 @@ pub struct Document {
 
 
 //-----------------------------------------------------------------------------
+
+impl Position {
+    /// Returns the position `(row, column)`.
+    #[inline(always)]
+    pub fn from(row: usize, column: usize) -> Position {
+        Position {
+            row, column
+        }
+    }
+}
+
+impl Range {
+    /// Returns the range from `(start_row, start_column)` to `(end_row, end_column)`.
+    #[inline(always)]
+    pub fn from(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize
+    ) -> Range {
+
+        Range {
+            beginning: Position::from(start_row, start_column),
+            ending: Position::from(end_row, end_column)
+        }
+    }
+}
 
 impl Indentation {
     /// Returns an all-spaces indentation poli6cy with each tab level `count`
@@ -310,7 +339,7 @@ impl Document {
     /// ```
     /// use ls_core::document::*;
     /// let document = Document::new();
-    /// assert_eq!(*document.lines(), vec![String::from("")]);
+    /// assert_eq!(document.text(), "");
     /// assert_eq!(document.anchors().len(), 2);
     /// assert_eq!(
     ///     document.anchor(Anchor::CURSOR).unwrap().position,
@@ -320,7 +349,7 @@ impl Document {
     /// ```
     pub fn new() -> Document {
         Document {
-            lines: vec![String::new()],
+            lines: vec![vec![]],
             anchors: vec![Anchor::default(), Anchor::default()],
             indentation: Indentation::spaces(4),
             undo_buffer: Vec::new(),
@@ -348,15 +377,15 @@ impl Document {
     /// use ls_core::document::*;
     /// let empty = Document::from("Hello\n  there!\n");
     /// assert_eq!(*empty.lines(), vec![
-    ///     String::from("Hello"),
-    ///     String::from("  there!")
+    ///     "Hello".chars().collect::<Vec<char>>(),
+    ///     "  there!".chars().collect::<Vec<char>>()
     /// ]);
     /// ```
     pub fn from(text: &str) -> Document {
-        let lines: Vec<String> = if text == "" {
-            vec![String::new()]
+        let lines: Vec<Vec<char>> = if text == "" {
+            vec![vec![]]
         } else {
-            text.lines().map(|x| String::from(x)).collect()
+            text.lines().map(|x| x.chars().collect::<Vec<char>>()).collect()
         };
 
         Document { 
@@ -413,7 +442,7 @@ impl Document {
 
     /// Returns the text of the document as a list of lines. This is guaranteed to contain
     /// at least one line.
-    pub fn lines(&self) -> &Vec<String> {
+    pub fn lines(&self) -> &Vec<Vec<char>> {
         &self.lines
     }
 
@@ -446,9 +475,22 @@ impl Document {
 
     /// Returns the document as a single string with lines separated by "\n".
     pub fn text(&self) -> String {
-        self.lines.join("\n")
+        self.lines.iter().map(|x| x.iter().collect::<String>())
+            .collect::<Vec<String>>().join("\n")
     }
 
+    /// Returns the range as a single string with lines separated by "\n",
+    /// or None if the range is invalid.
+    pub fn text_range(&self, range: &Range) -> Option<String> {
+        // if self.range_valid(range) {
+        //     if range.beginning.row == range.ending.row {
+                
+        //     }
+        // } else {
+        //     None
+        // }
+        todo!();
+    }
 
 
 
@@ -460,22 +502,23 @@ impl Document {
     ///
     /// # Panics
     /// Panics if asked to insert 0 lines or if `position` is out of range.
-    fn insert_untracked(&mut self, text: &Vec<String>, position: &Position) -> Change {
+    fn insert_untracked(&mut self, text: &Vec<Vec<char>>, position: &Position) -> Change {
         if text.len() == 0 {
             panic!("cannot insert 0 lines");
         }
         self.assert_position_valid(position);
 
-        let before = self.lines[position.row].chars().take(position.column).collect::<String>();
-        let after = self.lines[position.row].chars().skip(position.column).collect::<String>();
+        let after = self.lines[position.row].drain(position.column..).collect::<Vec<char>>();
 
         if text.len() == 1 {
-            self.lines[position.row] = before + &text[0] + &after;
+            self.lines[position.row].extend(text[0].iter());
+            self.lines[position.row].extend(after.iter());
         } else {
-            self.lines[position.row] = before + &text[0];
-
-            push_all_at(&mut self.lines, position.row + 1, &text[1..]);
-            self.lines[position.row + text.len() - 1] += &after;
+            self.lines[position.row].extend(text[0].iter());
+            let to_append = text.iter().skip(1).cloned().collect::<Vec<Vec<char>>>();
+            
+            push_all_at(&mut self.lines, position.row + 1, &to_append);
+            self.lines[position.row + text.len() - 1].extend(after.iter());
         }
 
         Change::Remove { range: Range {
@@ -495,7 +538,41 @@ impl Document {
     /// # Panics
     /// Panics if `range` is invalid (out of bounds, reversed).
     fn remove_untracked(&mut self, range: &Range) -> Change {
-        todo!();
+        self.assert_range_valid(range);
+
+        if range.beginning.row == range.ending.row {
+            Change::Insert {
+                text: vec![self.lines[range.beginning.row]
+                    .drain(range.beginning.column..range.ending.column)
+                    .collect::<Vec<char>>()],
+                position: range.beginning
+            }
+        } else {
+            let mut lines = Vec::new();
+
+            lines.push(
+                self.lines[range.beginning.row]
+                    .drain(range.beginning.column..)
+                    .collect::<Vec<char>>()
+            );
+
+            let trailing = self.lines[range.ending.row]
+                .drain(range.ending.column..)
+                .collect::<Vec<char>>();
+
+            self.lines[range.beginning.row].extend(trailing);
+
+            lines.extend(
+                self.lines
+                    .drain((range.beginning.row + 1)..= range.ending.row)
+                    .map(|x| x.iter().copied().collect::<Vec<char>>())
+            );
+
+            Change::Insert {
+                text: lines,
+                position: range.beginning
+            }
+        }
     }
     
     /// Sets the content of anchor at index `index` to `value`.
@@ -584,7 +661,7 @@ impl Document {
 /// `v` must contain items with trait Clone and Default. This uses
 /// a *somewhat* efficient O(n) method via `Vec::swap`.
 ///
-/// Author: swizard ([https://stackoverflow.com/a/28687253])
+/// Author: swizard <https://stackoverflow.com/a/28687253>
 ///
 /// # Examples
 /// ```
@@ -669,7 +746,7 @@ mod tests {
         let mut document = Document::from("AAA\nBBB");
         
         assert_eq!(document.insert_untracked(
-            &vec![String::from("hello")],
+            &vec!["hello".chars().collect()],
             &Position { row: 0, column: 0 }
         ), Change::Remove { range: Range {
             beginning: Position { row: 0, column: 0 },
@@ -678,7 +755,7 @@ mod tests {
         assert_eq!(document.text(), "helloAAA\nBBB");
         
         assert_eq!(document.insert_untracked(
-            &vec![String::from("there"), String::from("friend")],
+            &vec!["there".chars().collect(), "friend".chars().collect()],
             &Position { row: 1, column: 2 }
         ), Change::Remove { range: Range {
             beginning: Position { row: 1, column: 2 },
@@ -687,9 +764,71 @@ mod tests {
         assert_eq!(document.text(), "helloAAA\nBBthere\nfriendB");
 
         document.insert_untracked(
-            &vec![String::from("ly")],
+            &vec!["ly".chars().collect()],
             &Position { row: 2, column: 7 }
         );
         assert_eq!(document.text(), "helloAAA\nBBthere\nfriendBly");
+    }
+
+    #[test]
+    fn unicode() {
+        let mut document = Document::from("🙈我爱unicode🦄\n매우 짜증나");
+        assert_eq!(document.lines()[0][0], '🙈');
+        assert_eq!(document.lines()[0][1], '我');
+        assert_eq!(document.lines()[0][10], '🦄');
+        assert_eq!(document.lines()[1][1], '우');
+        assert_eq!(document.text(), "🙈我爱unicode🦄\n매우 짜증나");
+
+        let chg = document.insert_untracked(&vec![
+            "👋🏻🤚🏻🖐🏻✋🏻🖖🏻👌🏻".chars().collect(),
+            "⌚️📱📲💻⌨️".chars().collect(),
+            "".chars().collect()
+        ], &Position::from(1, 0));
+        assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻✋🏻🖖🏻👌🏻\n⌚️📱📲💻⌨️\n매우 짜증나");
+
+        // Some emojis are two codepoints in a row...
+        // We don't handle that. Nope.
+        // (1, 6) is just after 👋🏻🤚🏻🖐🏻
+        // (2, 3) is just after ⌚️📱
+        let chg_2 = document.remove_untracked(&Range::from(1, 6, 2, 3));
+        assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻📲💻⌨️\n매우 짜증나");
+
+        chg_2.apply(&mut document);
+        assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻✋🏻🖖🏻👌🏻\n⌚️📱📲💻⌨️\n매우 짜증나");
+
+        chg.apply(&mut document);
+        assert_eq!(document.text(), "🙈我爱unicode🦄\n매우 짜증나");
+    }
+
+    #[test]
+    fn remove_untracked() {
+        let mut document = Document::from("01234\nabcde\nABCDE");
+
+        assert_eq!(
+            document.remove_untracked(&Range::from(1, 2, 1, 2)),
+            Change::Insert {
+                text: vec!["".chars().collect()],
+                position: Position::from(1, 2)
+            }
+        );
+        assert_eq!(document.text(), "01234\nabcde\nABCDE");
+
+        assert_eq!(
+            document.remove_untracked(&Range::from(1, 2, 1, 4)),
+            Change::Insert {
+                text: vec!["cd".chars().collect()],
+                position: Position::from(1, 2)
+            }
+        );
+        assert_eq!(document.text(), "01234\nabe\nABCDE");
+
+        assert_eq!(
+            document.remove_untracked(&Range::from(0, 4, 1, 1)),
+            Change::Insert {
+                text: vec!["4".chars().collect(), "a".chars().collect()],
+                position: Position::from(0, 4)
+            }
+        );
+        assert_eq!(document.text(), "0123be\nABCDE");
     }
 }
