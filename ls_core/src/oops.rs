@@ -10,6 +10,8 @@ use crate::document;
 #[derive(Debug)]
 pub enum Oops {
     Ouch(&'static str),
+    NonexistentAnchor(document::AnchorHandle),
+    CannotRemoveAnchor(document::AnchorHandle),
     InvalidIndex(usize, &'static str),
     InvalidPosition(document::Position, &'static str)
 }

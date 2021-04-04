@@ -4,6 +4,8 @@
 //! that enable speech coding.
 
 use crate::oops::Oops;
+use std::collections::hash_map;
+
 
 //-----------------------------------------------------------------------------
 
@@ -102,16 +104,16 @@ pub enum Change {
     Remove { range: Range },
 
     /// Represents changing the contents of previously existing anchor
-    /// at `index` to `value`.
-    AnchorSet { index: usize, value: Anchor },
+    /// at `handle` to `value`.
+    AnchorSet { handle: AnchorHandle, value: Anchor },
 
     /// Represents inserting a new anchor equal to `value`
-    /// at `index`.
-    AnchorInsert { index: usize, value: Anchor },
+    /// at `handle`.
+    AnchorInsert { handle: AnchorHandle, value: Anchor },
 
-    /// Represents removing the anchor at `index`, shifting subsequent
+    /// Represents removing the anchor at `handle`, shifting subsequent
     /// anchors to the left by one.
-    AnchorRemove { index: usize },
+    AnchorRemove { handle: AnchorHandle },
 
     /// Represents a change to the indentation policy.
     IndentationChange { value: Indentation }
@@ -126,8 +128,7 @@ pub struct ChangePacket {
     changes: Vec<Change>
 }
 
-
-
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct InsertOptions {
     escapes: bool,
     indent: bool,
@@ -135,13 +136,20 @@ pub struct InsertOptions {
     range: Option<Range>
 }
 
-
-
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct RemoveOptions {
     range: Option<Range>
 }
 
-pub type AnchorHandle = usize;
+pub type AnchorHandle = u32;
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct Anchors {
+    store: hash_map::HashMap<u32, Anchor>,
+    next_id: AnchorHandle
+}
+
+
 
 /// A buffer of text organized into lines. Equipped with undo, redo, and anchors.
 /// The top-level struct for this module.
@@ -151,7 +159,7 @@ pub type AnchorHandle = usize;
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Document {
     lines: Vec<Vec<char>>,
-    anchors: Vec<Anchor>,
+    anchors: Anchors,
     indentation: Indentation,
     undo_buffer: Vec<ChangePacket>,
     redo_buffer: Vec<ChangePacket>
@@ -322,11 +330,82 @@ impl Indentation {
 }
 
 impl Anchor {
-    /// The index of the cursor in a document's anchor list.
-    pub const CURSOR: usize = 0;
+    fn new() -> Anchor {
+        Anchor {
+            position: Default::default()
+        }
+    }
+}
 
-    /// The index of the mark in a document's anchor list.
-    pub const MARK: usize = 1;
+impl Anchors {
+    /// The id of the cursor in a document's anchor list.
+    pub const CURSOR: AnchorHandle = 0;
+
+    /// The id of the mark in a document's anchor list.
+    pub const MARK: AnchorHandle = 1;
+
+    fn new() -> Anchors {
+        let mut store = hash_map::HashMap::new();
+        store.insert(Anchors::CURSOR, Anchor::new());
+        store.insert(Anchors::MARK, Anchor::new());
+        
+        Anchors {
+            store,
+            next_id: 2 as AnchorHandle
+        }
+    }
+    
+    fn cursor(&self) -> &Anchor {
+        self.store.get(&Anchors::CURSOR).unwrap()
+    }
+    
+    fn mark(&self) -> & Anchor {
+        self.store.get(&Anchors::MARK).unwrap()
+    }
+    
+    fn get(&self, handle: AnchorHandle) -> Option<&Anchor> {
+        self.store.get(&handle)
+    }
+    
+    fn set(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<Anchor, Oops> {
+        match self.store.get_mut(&handle) {
+            None => Err(Oops::NonexistentAnchor(handle)),
+            Some(anchor) => {
+                let old = anchor.clone();
+                *anchor = *value;
+                Ok(old)
+            }
+        }
+    }
+    
+    fn create(&mut self, anchor: Anchor, force_handle: Option<AnchorHandle>) -> AnchorHandle {
+        let handle = match force_handle {
+            None => {
+                let id = self.next_id;
+                self.next_id += 1;
+                id
+            },
+            Some(h) => h
+        };              
+        
+        self.store.insert(handle, anchor);
+        handle
+    }
+    
+    fn remove(&mut self, handle: AnchorHandle) -> Result<Anchor, Oops> {
+        if handle == Anchors::CURSOR || handle == Anchors::MARK {
+            Err(Oops::CannotRemoveAnchor(handle))
+        } else {
+            match self.store.remove(&handle) {
+                None => Err(Oops::NonexistentAnchor(handle)),
+                Some(old) => Ok(old)
+            }
+        }
+    }
+
+    fn iter(&self) -> hash_map::Iter<'_, AnchorHandle, Anchor> {
+        self.store.iter()
+    }
 }
 
 impl Change {
@@ -345,9 +424,9 @@ impl Change {
         match self {
             Insert { text, position } =>        document.insert_untracked(&text, position),
             Remove { range } =>                 document.remove_untracked(range),
-            AnchorSet { index, value } =>       document.set_anchor_untracked(*index, value),
-            AnchorInsert { index, value } =>    document.insert_anchor_untracked(*index, value),
-            AnchorRemove { index } =>           document.remove_anchor_untracked(*index),
+            AnchorSet { handle, value } =>      document.set_anchor_untracked(*handle, value),
+            AnchorInsert { handle, value } =>   document.insert_anchor_untracked(*handle, value),
+            AnchorRemove { handle } =>          document.remove_anchor_untracked(*handle),
             IndentationChange { value } =>      document.set_indentation_untracked(value)
         }
     }
@@ -366,7 +445,7 @@ impl Document {
     /// assert_eq!(document.text(), "");
     /// assert_eq!(document.anchors().len(), 2);
     /// assert_eq!(
-    ///     document.anchor(Anchor::CURSOR).unwrap().position,
+    ///     document.anchor(Anchors::CURSOR).unwrap().position,
     ///     Position { row: 0, column: 0 }
     /// );
     /// assert_eq!(document.undo_redo_depth(), (0, 0));
@@ -374,7 +453,7 @@ impl Document {
     pub fn new() -> Document {
         Document {
             lines: vec![vec![]],
-            anchors: vec![Anchor::default(), Anchor::default()],
+            anchors: Anchors::new(),
             indentation: Indentation::spaces(4),
             undo_buffer: vec![],
             redo_buffer: vec![]
@@ -414,7 +493,7 @@ impl Document {
 
         Document { 
             lines,
-            anchors: vec![Anchor::default(), Anchor::default()],
+            anchors: Anchors::new(),
             indentation: Indentation::spaces(4),
             undo_buffer: vec![],
             redo_buffer: vec![]
@@ -505,23 +584,23 @@ impl Document {
 
     /// Returns a list of anchors. This list is guaranteed to contain the cursor at index
     /// 0 and the mark at index 1.
-    pub fn anchors(&self) -> &Vec<Anchor> {
-        &self.anchors
+    pub fn anchors(&self) -> hash_map::Iter<'_, AnchorHandle, Anchor> {
+        self.anchors.iter()
     }
 
-    /// Returns the anchor at index `index`, or `None` if out of bounds.
-    pub fn anchor(&self, index: usize) -> Option<&Anchor> {
-        self.anchors.get(index)
+    /// Returns anchor `handle`, or `None` if invalid handle.
+    pub fn anchor(&self, handle: AnchorHandle) -> Option<&Anchor> {
+        self.anchors.get(handle)
     }
 
     /// Returns the cursor.
-    pub fn cursor(&self) -> Anchor {
-        self.anchors[0]
+    pub fn cursor(&self) -> &Anchor {
+        self.anchors.cursor()
     }
 
     /// Returns the mark.
-    pub fn mark(&self) -> Anchor {
-        self.anchors[1]
+    pub fn mark(&self) -> &Anchor {
+        self.anchors.mark()
     }
 
     /// Returns `(u, r)`, where `u` is the number of undo operations we can perform,
@@ -587,7 +666,7 @@ impl Document {
     }
 
 
-
+    
     pub fn insert(&mut self, text: &String, options: &InsertOptions) -> Result<(), Oops> {
         todo!();
     }
@@ -596,7 +675,7 @@ impl Document {
         todo!();
     }
     
-    pub fn set_anchor_position(&mut self, index: usize, position: &Position) -> Result<(), Oops> {
+    pub fn set_anchor_position(&mut self, handle: AnchorHandle, position: &Position) -> Result<(), Oops> {
         todo!();
     }
     
@@ -694,59 +773,44 @@ impl Document {
         }
     }
     
-    /// Sets the content of anchor at index `index` to `value`.
+    /// Sets the content of anchor `handle` to `value`.
     /// Returns the `Change` which would undo this modification.
     ///
     /// # Panics
-    /// Panics if index is out of range or if the anchor points to an invalid position.
-    fn set_anchor_untracked(&mut self, index: usize, value: &Anchor) -> Change {
-        if index >= self.anchors.len() {
-            panic!("set_anchor_untracked: invalid index {}", index);
-        }
+    /// Panics if `handle` is invalid or the anchor would point to an invalid position.
+    fn set_anchor_untracked(&mut self, handle: AnchorHandle, value: &Anchor) -> Change {
         self.assert_position_valid(&value.position);
-        
-        let orig_value = self.anchors[index];
-        self.anchors[index] = *value;
-        
-        Change::AnchorSet { index, value: orig_value }
-    }
-    
-    /// Inserts a new anchor at `index` with value `value`.
-    /// Returns the `Change` which would undo this modification.
-    ///
-    /// Indices 0 and 1 are used for the cursor and mark, so no
-    /// new anchors can be inserted before index 2.
-    ///
-    /// # Panics
-    /// Panics if `index` is out of range or if the anchor points to an invalid position.
-    fn insert_anchor_untracked(&mut self, index: usize, value: &Anchor) -> Change {
-        if index < 2 || index > self.anchors.len() {
-            panic!("insert_anchor_untracked: invalid index {}", index);
-        }
-        self.assert_position_valid(&value.position);
-        
-        self.anchors.insert(index, *value);
 
-        Change::AnchorRemove { index }
+        match self.anchors.set(handle, value) {
+            Err(_) => panic!("Tried to set invalid anchor handle {}", handle),
+            Ok(original) => Change::AnchorSet { handle, value: original }
+        }
     }
     
-    /// Removes the anchor at index `index`.
+    /// Inserts a new anchor at `handle` with value `value`.
     /// Returns the `Change` which would undo this modification.
     ///
-    /// Indices 0 and 1 are used for the cursor and mark, so no
-    /// new anchors can be inserted before index 2.
+    /// # Panics
+    /// Panics if `handle` exists or if the anchor points to an invalid position.
+    fn insert_anchor_untracked(&mut self, handle: AnchorHandle, value: &Anchor) -> Change {
+        self.assert_position_valid(&value.position);
+        self.anchors.create(*value, Some(handle));
+
+        Change::AnchorRemove { handle }
+    }
+    
+    /// Removes the anchor at `handle`.
+    /// Returns the `Change` which would undo this modification.
     ///
     /// # Panics
-    /// Panics if `index` is out of range.
-    fn remove_anchor_untracked(&mut self, index: usize) -> Change {
-        if index < 2 || index >= self.anchors.len() {
-            panic!("remove_anchor_untracked: invalid index {}", index);
+    /// Panics if `handle` is invalid.
+    fn remove_anchor_untracked(&mut self, handle: AnchorHandle) -> Change {
+        match self.anchors.remove(handle) {
+            Ok(old) => Change::AnchorInsert { handle, value: old },
+            Err(_) => {
+                panic!("Tried to remove nonexistent anchor handle {}", handle)
+            }
         }
-        
-        let orig_value = self.anchors[index];
-        self.anchors.remove(index);
-        
-        Change::AnchorInsert { index, value: orig_value }     
     }
 
     /// Sets the indentation policy.
@@ -825,14 +889,14 @@ mod tests {
     #[test]
     fn set_anchor_untracked() {
         let mut document = Document::from("AAA\nBBB");
-        let inverse = document.set_anchor_untracked(Anchor::CURSOR, &Anchor {
+        let inverse = document.set_anchor_untracked(Anchors::CURSOR, &Anchor {
             position: Position { row: 1, column: 3 }
         });
 
         assert_eq!(document.cursor().position, Position { row: 1, column: 3 });
 
         assert_eq!(inverse, Change::AnchorSet {
-            index: Anchor::CURSOR,
+            handle: Anchors::CURSOR,
             value: Anchor {
                 position: Position { row: 0, column: 0 }
             }
@@ -842,18 +906,18 @@ mod tests {
     #[test]
     fn insert_remove_anchor_untracked() {
         let mut document = Document::from("AAA\nBBB");
-        let inverse = document.insert_anchor_untracked(document.anchors().len(), &Anchor {
+        let inverse = document.insert_anchor_untracked(2, &Anchor {
             position: Position { row: 1, column: 3 }
         });
 
         assert_eq!(document.anchor(2).unwrap().position, Position { row: 1, column: 3 });
-        assert_eq!(inverse, Change::AnchorRemove { index: 2 });
+        assert_eq!(inverse, Change::AnchorRemove { handle: 2 });
 
         let inverse_2 = inverse.apply_untracked(&mut document);
 
         assert_eq!(document.anchors().len(), 2);
         assert_eq!(inverse_2, Change::AnchorInsert {
-            index: 2,
+            handle: 2,
             value: Anchor {
                 position: Position { row: 1, column: 3 }
             }
