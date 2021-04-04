@@ -128,6 +128,7 @@ pub struct ChangePacket {
     changes: Vec<Change>
 }
 
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct InsertOptions {
     escapes: bool,
@@ -136,12 +137,15 @@ pub struct InsertOptions {
     range: Option<Range>
 }
 
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct RemoveOptions {
     range: Option<Range>
 }
 
+
 pub type AnchorHandle = u32;
+
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Anchors {
@@ -150,19 +154,23 @@ pub struct Anchors {
 }
 
 
+#[derive(Clone, Debug)]
+pub struct UndoRedoStacks {
+    undo_stack: Vec<ChangePacket>,
+    redo_stack: Vec<ChangePacket>
+}
 
 /// A buffer of text organized into lines. Equipped with undo, redo, and anchors.
 /// The top-level struct for this module.
 ///
 /// The [`Document`] is central to ls_core. Clients of ls_core are likely
 /// to spend much of their time working with this type.
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Document {
     lines: Vec<Vec<char>>,
     anchors: Anchors,
     indentation: Indentation,
-    undo_buffer: Vec<ChangePacket>,
-    redo_buffer: Vec<ChangePacket>
+    undo_redo: UndoRedoStacks
 }
 
 
@@ -194,18 +202,16 @@ impl Range {
             ending: Position::from(end_row, end_column)
         }
     }
-}
 
-impl ChangePacket {
-    pub fn new() -> ChangePacket {
-        ChangePacket {
-            changes: vec![]
-        }
+    pub fn empty(&self) -> bool {
+        self.beginning == self.ending
     }
 }
 
+
+
 impl Indentation {
-    /// Returns an all-spaces indentation poli6cy with each tab level `count`
+    /// Returns an all-spaces indentation policy with each tab level `count`
     /// spaces apart.
     ///
     /// # Panics
@@ -329,6 +335,24 @@ impl Indentation {
     }
 }
 
+impl InsertOptions {
+    pub fn exact() -> InsertOptions {
+        InsertOptions {
+            escapes: false,
+            indent: false,
+            spacing: false,
+            range: None
+        }
+    }
+    
+    pub fn exact_at(range: &Range) -> InsertOptions {
+        InsertOptions {
+            range: Some(*range),
+            ..InsertOptions::exact()
+        }
+    }
+}
+
 impl Anchor {
     fn new() -> Anchor {
         Anchor {
@@ -433,6 +457,69 @@ impl Change {
     
 }
 
+impl ChangePacket {
+    pub fn new() -> ChangePacket {
+        ChangePacket {
+            changes: vec![]
+        }
+    }
+
+}
+
+impl UndoRedoStacks {
+    pub fn new() -> UndoRedoStacks {
+        UndoRedoStacks {
+            undo_stack: vec![],
+            redo_stack: vec![]
+        }
+    }
+    
+    pub fn forget_redos(&mut self) -> () {
+        if self.redo_stack.len() > 0 {
+            self.redo_stack.clear();
+        }
+    }
+    
+    pub fn forget_everything(&mut self) -> () {
+        self.forget_redos();
+        
+        if self.undo_stack.len() > 0 {
+            self.undo_stack.clear();
+        }
+    }
+    
+    pub fn checkpoint(&mut self) -> () {
+        self.forget_redos();
+        
+        if self.undo_stack.len() == 0 || self.undo_stack.last().unwrap().changes.len() != 0 {
+            self.undo_stack.push(ChangePacket::new());
+        }
+    }
+    
+    pub fn push_undo(&mut self, change: Change) -> () {
+        self.forget_redos();
+        
+        if self.undo_stack.len() == 0 {
+            self.undo_stack.push(ChangePacket::new());
+        }
+        
+        self.undo_stack.last_mut().unwrap().changes.push(change);
+    }
+
+    /// Returns `(u, r)`, where `u` is the number of undo operations we can perform,
+    /// and `r` is the number of redo operations we can perform.
+    pub fn depth(&self) -> (usize, usize) {
+        (Self::depth_stack(&self.undo_stack), Self::depth_stack(&self.redo_stack))
+    }
+
+    fn depth_stack(v: &Vec<ChangePacket>) -> usize {
+        v.len() - match v.last() {
+            None => 0,
+            Some(last) => if last.changes.len() == 0 { 1 } else { 0 }
+        }
+    }
+}
+
 impl Document {
     /// Returns an empty document with one empty line. This sets aside cursor and mark
     /// in the first two anchor indices (cursor at `Anchor::CURSOR`, mark at `Anchor::MARK`)
@@ -448,15 +535,14 @@ impl Document {
     ///     document.anchor(Anchors::CURSOR).unwrap().position,
     ///     Position { row: 0, column: 0 }
     /// );
-    /// assert_eq!(document.undo_redo_depth(), (0, 0));
+    /// assert_eq!(document.undo_redo().depth(), (0, 0));
     /// ```
     pub fn new() -> Document {
         Document {
             lines: vec![vec![]],
             anchors: Anchors::new(),
             indentation: Indentation::spaces(4),
-            undo_buffer: vec![],
-            redo_buffer: vec![]
+            undo_redo: UndoRedoStacks::new()
         }
     }
 
@@ -473,7 +559,7 @@ impl Document {
     /// ```
     /// use ls_core::document::*;
     /// let empty = Document::from("");
-    /// assert_eq!(empty, Document::new());
+    /// assert_eq!(empty.text(), Document::new().text());
     /// ```
     ///
     /// ```
@@ -495,8 +581,7 @@ impl Document {
             lines,
             anchors: Anchors::new(),
             indentation: Indentation::spaces(4),
-            undo_buffer: vec![],
-            redo_buffer: vec![]
+            undo_redo: UndoRedoStacks::new()
         }
     }
 
@@ -603,10 +688,22 @@ impl Document {
         self.anchors.mark()
     }
 
-    /// Returns `(u, r)`, where `u` is the number of undo operations we can perform,
-    /// and `r` is the number of redo operations we can perform.
-    pub fn undo_redo_depth(&self) -> (usize, usize) {
-        (self.undo_buffer.len(), self.redo_buffer.len())
+
+
+
+    pub fn selection(&self) -> Range {
+        let cursor = self.cursor().clone();
+        let mark = self.mark().clone();
+        if cursor.position <= mark.position {
+            return Range { beginning: cursor.position, ending: mark.position }
+        } else {
+            return Range { beginning: mark.position, ending: cursor.position }
+        }
+    }
+
+
+    pub fn undo_redo(&self) -> &UndoRedoStacks {
+        &self.undo_redo
     }
 
     /// Returns the document as a single string with lines separated by "\n".
@@ -668,14 +765,50 @@ impl Document {
 
     
     pub fn insert(&mut self, text: &String, options: &InsertOptions) -> Result<(), Oops> {
-        todo!();
+        if options.spacing || options.escapes || options.indent {
+            todo!();
+        }
+        
+        let range = match options.range {
+            None => self.selection(),
+            Some(r) => {
+                if !self.range_valid(&r) {
+                    return Err(Oops::InvalidRange(r, "insert"));
+                }
+                r
+            }
+        };
+
+        // TODO: process this according to options
+        // TODO: Handle multiple line input
+        let lines = vec![text.chars().collect::<Vec<char>>()];
+
+        if lines.len() == 0 || (lines.len() == 1 && lines[0].len() == 0) {
+            return Err(Oops::EmptyString("can't insert nothing"));
+        }
+
+        if !range.empty() {
+            todo!();
+        }
+
+        
+        
+        let change = Change::Insert {
+            text: lines,
+            position: range.beginning
+        };
+        
+        let inverse = change.apply_untracked(self);
+        self.undo_redo.push_undo(inverse);
+
+        Ok(())
     }
         
     pub fn remove(&mut self, options: &RemoveOptions) -> Result<(), Oops> {
         todo!();
     }
     
-    pub fn set_anchor_position(&mut self, handle: AnchorHandle, position: &Position) -> Result<(), Oops> {
+    pub fn set_anchor(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<(), Oops> {
         todo!();
     }
     
@@ -683,9 +816,43 @@ impl Document {
         todo!();
     }
     
+    pub fn set_cursor(&mut self, position: &Position) -> Result<(), Oops> {
+        todo!();
+    }
+    
+    pub fn set_mark(&mut self, position: &Position) -> Result<(), Oops> {
+        todo!();
+    }
+    
+    pub fn set_cursor_and_mark(&mut self, position: &Position) -> Result<(), Oops> {
+        todo!();
+    }
+    
+    pub fn set_selection(&mut self, range: &Range) -> Result<(), Oops> {
+        todo!();
+    }
+    
+    pub fn remove_anchor(&mut self, handle: AnchorHandle) -> Result<(), Oops> {
+        todo!();
+    }
+    
+    pub fn set_indentation(&mut self, indentation: &Indentation) -> Result<(), Oops> {
+        todo!();
+    }
     
 
-
+    pub fn undo(&mut self, quantity: usize) -> Result<usize, Oops> {
+        todo!();
+    }
+    
+    pub fn redo(&mut self, quantity: usize) -> Result<usize, Oops> {
+        todo!();
+    }
+    
+    pub fn forget_undo_redo(&mut self) -> Result<(), Oops> {
+        todo!();
+    }
+    
 
 
 
@@ -831,7 +998,7 @@ impl Document {
 
     /// Asserts that a range is valid (start and end positions are both valid,
     /// start does not come after end.)
-    ///
+    /// 
     /// # Panics
     /// Panics if `range` is invalid.
     fn assert_range_valid(&self, range: &Range) -> () {

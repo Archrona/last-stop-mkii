@@ -13,5 +13,7 @@ pub enum Oops {
     NonexistentAnchor(document::AnchorHandle),
     CannotRemoveAnchor(document::AnchorHandle),
     InvalidIndex(usize, &'static str),
-    InvalidPosition(document::Position, &'static str)
+    InvalidPosition(document::Position, &'static str),
+    InvalidRange(document::Range, &'static str),
+    EmptyString(&'static str)
 }
