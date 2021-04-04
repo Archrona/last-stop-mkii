@@ -440,10 +440,43 @@ impl Document {
             && range.beginning <= range.ending
     }
 
+    /// Returns the `index`th line as a `&String`, or `None` if out of bounds.
+    pub fn line(&self, index: usize) -> Option<String> {
+        if index >= self.lines.len() {
+            None
+        } else {
+            Some(self.lines[index].iter().copied().collect())
+        }
+    }
+
     /// Returns the text of the document as a list of lines. This is guaranteed to contain
     /// at least one line.
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// let document = Document::from("Hello\nthere");
+    /// assert_eq!(*document.lines(), vec![
+    ///     "Hello".chars().collect::<Vec<char>>(),
+    ///     "there".chars().collect::<Vec<char>>()
+    /// ]);
+    /// ```
     pub fn lines(&self) -> &Vec<Vec<char>> {
         &self.lines
+    }
+
+
+    /// Returns the number of rows in the document. Will always be at least 1.
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// assert_eq!(Document::new().rows(), 1);
+    /// let document = Document::from("Hello\nthere\ncaptain!");
+    /// assert_eq!(document.rows(), 3);
+    /// ```
+    pub fn rows(&self) -> usize {
+        self.lines.len()
     }
 
     /// Returns a list of anchors. This list is guaranteed to contain the cursor at index
@@ -474,6 +507,13 @@ impl Document {
     }
 
     /// Returns the document as a single string with lines separated by "\n".
+    ///
+    /// # Examples
+    /// ```
+    /// use ls_core::document::*;
+    /// let document = Document::from("Hello\nthere\ncaptain!");
+    /// assert_eq!(document.text(), "Hello\nthere\ncaptain!".to_string());
+    /// ```
     pub fn text(&self) -> String {
         self.lines.iter().map(|x| x.iter().collect::<String>())
             .collect::<Vec<String>>().join("\n")
