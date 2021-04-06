@@ -131,31 +131,75 @@ pub struct ChangePacket {
 }
 
 
+/// Options for [`Document::insert`].
+///
+/// Inserting elements into a document is a complicated operation.
+/// This allows callers to easily specify multiple insert operations using
+/// sensible defaults like [`InsertOptions::exact`].
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct InsertOptions {
+    /// Should the insert operation escape commands like $u (indent), $d (dedent),
+    /// $n (newline), $g (glue), and so forth?
+    /// 
+    /// These escapes are used by speech editing to perform special operations.
     escapes: bool,
+
+    /// Should the insert automatically indent Lines after the first?
     indent: bool,
+
+    /// Should the insert attempt to either insert or remove whitespace
+    /// immediately before and immediately after the inserted content
+    /// in a language-specific manner?
     spacing: bool,
+
+    /// If `None`, the insert takes place between the cursor and mark.
+    /// Otherwise, the insert takes place at this range.
     range: Option<Range>
 }
 
 
+/// Options for [`Document::remove`].
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct RemoveOptions {
+    /// If `None`, the removal takes place between the cursor and mark.
+    /// Otherwise, this range is removed.
     range: Option<Range>
 }
 
-
+/// An opaque-ish handle which acts as a unique key within a document for
+/// anchors. The cursor is locked to [`Anchors::CURSOR`] and the mark is
+/// locked to [`Anchors::MARK`], but no assumptions should be made as to the
+/// handles assigned to other anchors.
 pub type AnchorHandle = u32;
 
 
+/// A container for [`Anchor`]s on a per-document basis.
+/// 
+/// Responsible for assigning unique handles ([`AnchorHandle`]) to each
+/// anchor. 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Anchors {
     store: hash_map::HashMap<u32, Anchor>,
     next_id: AnchorHandle
 }
 
-
+/// Maintains the undo and redo stacks for a [`Document`].
+/// 
+/// A single editing command (insert, remove, etc.) can result in many
+/// reversible changes which must be tracked in order to undo the command.
+/// For this reason, we track changes in groups called [`ChangePacket`]s.
+/// If an undo or redo command is issued, it is performed at the packet
+/// level of granularity.
+/// 
+/// To indicate that a new packet should begin with the next [`Change`]
+/// tracked, use [`UndoRedoStacks::checkpoint`].
+/// 
+/// Change tracking takes a quantity of memory not too much greater than
+/// the total UTF-8 payload of all insertions and removals. However, for
+/// long-running editing processes or for very large files, this change
+/// tracking can become a memory burden. To signal that the undo and redo
+/// stacks should be cleared, freeing this memory, use 
+/// [`UndoRedoStacks::forget_everything`].
 #[derive(Clone, Debug)]
 pub struct UndoRedoStacks {
     undo_stack: Vec<ChangePacket>,
@@ -206,6 +250,7 @@ impl Range {
         }
     }
 
+    /// Returns true if the range starts and ends at the same position.
     pub fn empty(&self) -> bool {
         self.beginning == self.ending
     }
@@ -341,6 +386,8 @@ impl Indentation {
 }
 
 impl InsertOptions {
+    /// Returns insert options which indicate the inserted text should be placed into
+    /// the document with no escapes, indentation, or spacing at the current selection.
     pub fn exact() -> InsertOptions {
         InsertOptions {
             escapes: false,
@@ -350,6 +397,8 @@ impl InsertOptions {
         }
     }
     
+    /// Returns insert options which indicate the inserted text should be placed into
+    /// the document with no escapes, indentation, or spacing at [`range`].
     pub fn exact_at(range: &Range) -> InsertOptions {
         InsertOptions {
             range: Some(*range),
@@ -359,12 +408,16 @@ impl InsertOptions {
 }
 
 impl RemoveOptions {
+    /// Returns remove options which indicate a normal removal of the current selection
+    /// with no special options.
     pub fn exact() -> RemoveOptions {
         RemoveOptions {
             range: None
         }
     }
 
+    /// Returns remove options which indicate a normal removal at [`range`] with no
+    /// special options.
     pub fn exact_at(range: &Range) -> RemoveOptions {
         RemoveOptions {
             range: Some(*range),
@@ -374,12 +427,14 @@ impl RemoveOptions {
 }
 
 impl Anchor {
+    /// Creates an anchor at position (0, 0).
     pub fn new() -> Anchor {
         Anchor {
             position: Default::default()
         }
     }
 
+    /// Creates an anchor at position (`row`, `column`).
     pub fn from(row: usize, column: usize) -> Anchor {
         Anchor {
             position: Position::from(row, column),
@@ -395,6 +450,8 @@ impl Anchors {
     /// The id of the mark in a document's anchor list.
     pub const MARK: AnchorHandle = 1;
 
+    /// Returns a new [`Anchors`] with just a cursor and mark at position
+    /// (0, 0).
     fn new() -> Anchors {
         let mut store = hash_map::HashMap::new();
         store.insert(Anchors::CURSOR, Anchor::new());
@@ -406,18 +463,26 @@ impl Anchors {
         }
     }
     
+    /// Returns the cursor (the primary anchor of a document). This
+    /// [`Anchor`] is guaranteed to exist.
     fn cursor(&self) -> &Anchor {
         self.store.get(&Anchors::CURSOR).unwrap()
     }
     
+    /// Returns the mark (the secondary anchor of a document). This
+    /// [`Anchor`] is guaranteed to exist.
     fn mark(&self) -> & Anchor {
         self.store.get(&Anchors::MARK).unwrap()
     }
     
+    /// Returns the anchor with handle `handle`, or `None` if the handle
+    /// is not valid.
     fn get(&self, handle: AnchorHandle) -> Option<&Anchor> {
         self.store.get(&handle)
     }
     
+    /// Sets the anchor with handle `handle` to `value`. Fails if `handle` does not
+    /// exist.
     fn set(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<Anchor, Oops> {
         match self.store.get_mut(&handle) {
             None => Err(Oops::NonexistentAnchor(handle)),
@@ -429,6 +494,12 @@ impl Anchors {
         }
     }
     
+    /// Creates a new anchor with contents `anchor`. 
+    /// 
+    /// If `force_handle` is not `None`, the new anchor will
+    /// use handle `force_handle`. This feature is not meant to be used
+    /// directly by client code, but by undo-redo functionality which needs
+    /// to roll the state back deterministically.
     fn create(&mut self, anchor: Anchor, force_handle: Option<AnchorHandle>) -> AnchorHandle {
         let handle = match force_handle {
             None => self.get_new_handle(),
@@ -439,6 +510,7 @@ impl Anchors {
         handle
     }
     
+    /// Removes the anchor with handle `handle`. Fails if `handle` does not exist.
     fn remove(&mut self, handle: AnchorHandle) -> Result<Anchor, Oops> {
         if handle == Anchors::CURSOR || handle == Anchors::MARK {
             Err(Oops::CannotRemoveAnchor(handle))
@@ -450,10 +522,14 @@ impl Anchors {
         }
     }
 
+    /// Returns an iterator over all (handle, anchor) pairs, in no
+    /// particular order.
     fn iter(&self) -> hash_map::Iter<'_, AnchorHandle, Anchor> {
         self.store.iter()
     }
 
+    /// Generates a new, unused [`AnchorHandle`], incrementing the internal
+    /// counter so that it remains unique.
     fn get_new_handle(&mut self) -> AnchorHandle {
         let id = self.next_id;
         self.next_id += 1;
@@ -487,6 +563,7 @@ impl Change {
 }
 
 impl ChangePacket {
+    /// Returns a new `ChangePacket` with no changes stored.
     pub fn new() -> ChangePacket {
         ChangePacket {
             changes: vec![]
@@ -496,6 +573,7 @@ impl ChangePacket {
 }
 
 impl UndoRedoStacks {
+    /// Returns a new `UndoRedoStacks` with empty stacks and no checkpoint requested.
     pub fn new() -> UndoRedoStacks {
         UndoRedoStacks {
             undo_stack: vec![],
@@ -504,12 +582,17 @@ impl UndoRedoStacks {
         }
     }
     
+    /// Clears the redo stack. This is invoked automatically whenever an undo is
+    /// added to the undo stack, but it can be called out of cycle to
+    /// invalidate redos by client code.
     pub fn forget_redos(&mut self) -> () {
         if self.redo_stack.len() > 0 {
             self.redo_stack.clear();
         }
     }
     
+    /// Clears undos and redos, returning this `UndoRedoStacks` to its
+    /// "factory new" configuration. This cannot be undone!
     pub fn forget_everything(&mut self) -> () {
         self.forget_redos();
         
@@ -518,11 +601,19 @@ impl UndoRedoStacks {
         }
     }
     
+    /// Requests that subsequent actions be added to a new [`ChangePacket`].
+    /// This does not immediately add a new change packet, so it can be
+    /// called multiple times in quick succession and only one change packet
+    /// will be generated.
+    /// 
+    /// Checkpointing clears the redo stack, regardless. Be advised!
     pub fn checkpoint(&mut self) -> () {
         self.forget_redos();
         self.checkpoint_requested = true;
     }
     
+    /// Adds the inverse of a recently applied [`Change`] to the
+    /// undo stack, forgetting the redo stack.
     pub fn push_undo(&mut self, change: Change) -> () {
         self.forget_redos();
         
@@ -710,8 +801,12 @@ impl Document {
     }
 
 
-
-
+    /// Returns the [`Range`] representing the region between the cursor and mark.
+    /// 
+    /// The beginning of the range will be the earlier of the cursor and mark.
+    /// There is no way to know whether the start or end of the range is the cursor.
+    /// If you need this information, consider using [`Document::cursor`] and
+    /// [`Document::mark`] instead.
     pub fn selection(&self) -> Range {
         let cursor = self.cursor().clone();
         let mark = self.mark().clone();
@@ -722,7 +817,7 @@ impl Document {
         }
     }
 
-
+    /// Returns the [`UndoRedoStacks`] for this [`Document`].
     pub fn undo_redo(&self) -> &UndoRedoStacks {
         &self.undo_redo
     }
@@ -783,6 +878,8 @@ impl Document {
         }
     }
 
+    /// Returs a `Vec<Vec<char>>` prepared for insertion from `text`, a `&str`,
+    /// under insert options `options` at `position`.
     #[allow(unused_variables)]
     fn prep_text(text: &str, position: &Position, options: &InsertOptions) -> Vec<Vec<char>> {
         if options.spacing || options.escapes || options.indent {
@@ -802,6 +899,7 @@ impl Document {
         lines
     }
     
+    /// Inserts `text` into the document with `options`.
     pub fn insert(&mut self, text: &str, options: &InsertOptions) -> Result<(), Oops> {
         let range = match options.range {
             None => self.selection(),
@@ -870,10 +968,7 @@ impl Document {
     }
 
 
-
-
-
-        
+    /// Removes the current selection (or the range specified in `options`).
     pub fn remove(&mut self, options: &RemoveOptions) -> Result<(), Oops> {
         let range = match options.range {
             None => self.selection(),
@@ -932,6 +1027,8 @@ impl Document {
         Ok(())
     }
     
+    /// Sets anchor `handle` to `value`. Returns an `Err` if `handle` does not
+    /// exist or if `value` points to an invalid position.
     pub fn set_anchor(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<(), Oops> {
         if let None = self.anchors.get(handle) {
             return Err(Oops::NonexistentAnchor(handle));
@@ -946,6 +1043,8 @@ impl Document {
         Ok(())
     }
     
+    /// Creates a new anchor with contents `anchor`, returning its
+    /// [`AnchorHandle`] or `Err` if the requested position is invalid.
     pub fn create_anchor(&mut self, anchor: &Anchor) -> Result<AnchorHandle, Oops> {
         if !self.position_valid(&anchor.position) {
             return Err(Oops::InvalidPosition(anchor.position, "create_anchor"));
@@ -958,6 +1057,7 @@ impl Document {
         Ok(handle)
     }
     
+    /// Moves the cursor to `position`.
     pub fn set_cursor(&mut self, position: &Position) -> Result<(), Oops> {
         self.set_anchor(Anchors::CURSOR, &Anchor {
             position: *position,
@@ -965,6 +1065,7 @@ impl Document {
         })
     }
     
+    /// Moves the mark to `position`.
     pub fn set_mark(&mut self, position: &Position) -> Result<(), Oops> {
         self.set_anchor(Anchors::MARK, &Anchor {
             position: *position,
@@ -972,12 +1073,15 @@ impl Document {
         })
     }
     
+    /// Moves both cursor and mark to `position`.
     pub fn set_cursor_and_mark(&mut self, position: &Position) -> Result<(), Oops> {
         self.set_cursor(position)?;
         self.set_mark(position)?;
         Ok(())
     }
     
+    /// Moves the mark to the beginning of `range` and the cursor to the 
+    /// end of `range`.
     pub fn set_selection(&mut self, range: &Range) -> Result<(), Oops> {
         if !self.range_valid(range) {
             Err(Oops::InvalidRange(*range, "set_selection"))
@@ -988,6 +1092,7 @@ impl Document {
         }
     }
     
+    /// Removes the anchor at `handle`, or returns `Err` if invalid.
     pub fn remove_anchor(&mut self, handle: AnchorHandle) -> Result<(), Oops> {
         if let None = self.anchors.get(handle) {
             return Err(Oops::NonexistentAnchor(handle));
@@ -999,6 +1104,8 @@ impl Document {
         Ok(())
     }
     
+    /// Sets the indentation policy of this document to `indentation`.
+    /// Does not actually change the document's text!
     pub fn set_indentation(&mut self, indentation: &Indentation) -> Result<(), Oops> {
         let inverse = self.set_indentation_untracked(indentation);
         self.undo_redo.push_undo(inverse);
@@ -1006,7 +1113,8 @@ impl Document {
     }
     
 
-
+    /// Undoes the most recently performed [`ChangePacket`], or returns error
+    /// if there is nothing to undo.
     pub fn undo_once(&mut self) -> Result<(), Oops> {
         match self.undo_redo.undo_stack.pop() {
             None => Err(Oops::NoMoreUndos(0)),
@@ -1022,6 +1130,10 @@ impl Document {
         }
     }
 
+    /// Undoes `quantity` [`ChangePacket`]s.
+    /// 
+    /// Returns `Ok(times)` or `Oops::NoMoreUndos(times)`,
+    /// where `times` is the number of change packets undone.
     pub fn undo(&mut self, quantity: usize) -> Result<usize, Oops> {
         for times in 0..quantity {
             let result = self.undo_once();
@@ -1034,6 +1146,8 @@ impl Document {
         Ok(quantity)
     }
     
+    /// Redoes the most recently undone [`ChangePacket`], or returns error
+    /// if there is nothing to redo.
     pub fn redo_once(&mut self) -> Result<(), Oops> {
         match self.undo_redo.redo_stack.pop() {
             None => Err(Oops::NoMoreRedos(0)),
@@ -1049,6 +1163,11 @@ impl Document {
         }
     }
 
+
+    /// Redoes `quantity` [`ChangePacket`]s.
+    /// 
+    /// Returns `Ok(times)` or `Oops::NoMoreRedos(times)`,
+    /// where `times` is the number of change packets redone.
     pub fn redo(&mut self, quantity: usize) -> Result<usize, Oops> {
         for times in 0..quantity {
             let result = self.redo_once();
@@ -1061,10 +1180,14 @@ impl Document {
         Ok(quantity)
     }
 
+    /// Requests a checkpoint from the [`UndoRedoStacks`]. This means that
+    /// the next undoable operation will occur on its own [`ChangePacket`].
     pub fn checkpoint(&mut self) -> () {
         self.undo_redo.checkpoint();
     }
     
+    /// Forgets all undo and redo data, meaning that the current state
+    /// of the document becomes the start of history.  Use wisely!
     pub fn forget_undo_redo(&mut self) -> Result<(), Oops> {
         self.undo_redo.forget_everything();
         Ok(())
