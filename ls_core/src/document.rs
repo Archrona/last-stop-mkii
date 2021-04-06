@@ -6,7 +6,6 @@
 use crate::oops::Oops;
 use std::collections::hash_map;
 
-
 //-----------------------------------------------------------------------------
 
 /// A row-column position in a [`Document`].
@@ -43,13 +42,13 @@ pub struct Position {
 /// and the cursor will track the most recent point in the selection
 /// (for example, following the mouse).
 ///
-/// The cursor's index in the document is `Anchor::CURSOR`.
-/// The mark's index in the document is `Anchor::MARK`.
+/// The cursor's handle is `Anchor::CURSOR`.
+/// The mark's handle is `Anchor::MARK`.
 ///
 /// # Performance
 ///
 /// This implementation does not scale well to large numbers of anchors. 
-/// Changes to documents incur a `O(n)` cost where `n` is the number of anchors.
+/// Insertions and deletions incur a `O(n)` cost where `n` is the number of anchors.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Debug, Default)]
 pub struct Anchor {
     pub position: Position
@@ -221,7 +220,7 @@ impl Indentation {
     /// ```
     /// use ls_core::document::*;
     /// let indent = Indentation::spaces(3);
-    /// assert_eq!(indent.produce(6), "      ");
+    /// assert_eq!(indent.produce(6), "      ".chars().collect::<Vec<char>>());
     /// ```
     pub fn spaces(count: usize) -> Indentation {
         if count == 0 {
@@ -247,8 +246,8 @@ impl Indentation {
     /// ```
     /// use ls_core::document::*;
     /// let indent = Indentation::tabs(3);
-    /// assert_eq!(indent.produce(6), "\t\t");
-    /// assert_eq!(indent.produce(11), "\t\t\t  ");
+    /// assert_eq!(indent.produce(6), "\t\t".chars().collect::<Vec<char>>());
+    /// assert_eq!(indent.produce(11), "\t\t\t  ".chars().collect::<Vec<char>>());
     /// ```
     pub fn tabs(spaces_per_tab: usize) -> Indentation {
         if spaces_per_tab == 0 {
@@ -269,19 +268,19 @@ impl Indentation {
     /// ```
     /// use ls_core::document::*;
     /// let indent = Indentation::spaces(2);
-    /// assert_eq!(indent.measure("    "), (4, 4));
-    /// assert_eq!(indent.measure("\t\t Hello \t there"), (5, 3));
+    /// assert_eq!(indent.measure(&"    ".chars().collect::<Vec<char>>()), (4, 4));
+    /// assert_eq!(indent.measure(&"\t\t Hello \t there".chars().collect::<Vec<char>>()), (5, 3));
     /// ```
-    pub fn measure(&self, line: &str) -> (usize, usize) {
+    pub fn measure(&self, line: &Vec<char>) -> (usize, usize) {
         let mut spaces: usize = 0;
         
-        for (byte, c) in line.char_indices() {
-            if c == ' ' {
+        for (col, c) in line.iter().enumerate() {
+            if *c == ' ' {
                 spaces += 1;
-            } else if c == '\t' {
+            } else if *c == '\t' {
                 spaces += self.spaces_per_tab;
             } else {
-                return (spaces, byte);
+                return (spaces, col);
             }
         }
         
@@ -293,11 +292,13 @@ impl Indentation {
     ///
     /// If this `Indentation` uses tabs and the requested number of spaces is not a
     /// multiple of `spaces_per_tab`, spaces will be used to complete the left margin.
-    pub fn produce(&self, spaces: usize) -> String {
+    pub fn produce(&self, spaces: usize) -> Vec<char> {
         if self.use_spaces {
-            " ".repeat(spaces)
+            [' '].repeat(spaces)
         } else {
-            "\t".repeat(spaces / self.spaces_per_tab) + &" ".repeat(spaces % self.spaces_per_tab)
+            let mut result = ['\t'].repeat(spaces / self.spaces_per_tab);
+            result.extend_from_slice(&[' '].repeat(spaces % self.spaces_per_tab));
+            result
         }
     }
 
@@ -312,23 +313,23 @@ impl Indentation {
     ///
     /// ```
     /// use ls_core::document::*;
-    /// assert_eq!(Indentation::spaces(4).indent("    Hello", -1, true), "Hello");
-    /// assert_eq!(Indentation::spaces(4).indent("    Hello", -1, false), "");
-    /// assert_eq!(Indentation::spaces(4).indent("    Hello", 1, true), "        Hello");
-    /// assert_eq!(Indentation::spaces(4).indent("    Hello", 1, false), "        ");
-    /// assert_eq!(Indentation::tabs(4).indent("     Hello", -1, true), " Hello");
-    /// assert_eq!(Indentation::tabs(4).indent("     Hello", -1, false), " ");
-    /// assert_eq!(Indentation::tabs(4).indent("     Hello", 1, true), "\t\t Hello");
-    /// assert_eq!(Indentation::tabs(4).indent("     Hello", 1, false), "\t\t ");
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), -1, true), "Hello".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), -1, false), "".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), 1, true), "        Hello".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), 1, false), "        ".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), -1, true), " Hello".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), -1, false), " ".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), 1, true), "\t\t Hello".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), 1, false), "\t\t ".chars().collect::<Vec<char>>());
     /// ```
-    pub fn indent(&self, line: &str, indent_delta: isize, include_content: bool) -> String {
-        let (spaces, bytes) = self.measure(line);
+    pub fn indent(&self, line: &Vec<char>, indent_delta: isize, include_content: bool) -> Vec<char> {
+        let (spaces, col) = self.measure(line);
         let requested_spaces: isize = (spaces as isize) + indent_delta * (self.spaces_per_tab as isize);
         let actual_spaces: usize = if requested_spaces < 0 { 0 } else { requested_spaces as usize };
         
         let mut result = self.produce(actual_spaces);
         if include_content {
-            result += &line[bytes..];
+            result.extend_from_slice(&line[col..]);
         }
         
         result
@@ -765,9 +766,7 @@ impl Document {
 
     
     pub fn insert(&mut self, text: &String, options: &InsertOptions) -> Result<(), Oops> {
-        if options.spacing || options.escapes || options.indent {
-            todo!();
-        }
+        
         
         let range = match options.range {
             None => self.selection(),
@@ -1181,4 +1180,5 @@ mod tests {
         );
         assert_eq!(document.text(), "0123be\nABCDE");
     }
+
 }
