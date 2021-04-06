@@ -12,6 +12,8 @@ pub enum Oops {
     Ouch(&'static str),
     NonexistentAnchor(document::AnchorHandle),
     CannotRemoveAnchor(document::AnchorHandle),
+    NoMoreUndos,
+    NoMoreRedos,
     InvalidIndex(usize, &'static str),
     InvalidPosition(document::Position, &'static str),
     InvalidRange(document::Range, &'static str),

@@ -5,6 +5,9 @@
 
 use crate::oops::Oops;
 use std::collections::hash_map;
+use regex::Regex;
+use lazy_static::lazy_static;
+
 
 //-----------------------------------------------------------------------------
 
@@ -156,7 +159,8 @@ pub struct Anchors {
 #[derive(Clone, Debug)]
 pub struct UndoRedoStacks {
     undo_stack: Vec<ChangePacket>,
-    redo_stack: Vec<ChangePacket>
+    redo_stack: Vec<ChangePacket>,
+    checkpoint_requested: bool
 }
 
 /// A buffer of text organized into lines. Equipped with undo, redo, and anchors.
@@ -471,7 +475,8 @@ impl UndoRedoStacks {
     pub fn new() -> UndoRedoStacks {
         UndoRedoStacks {
             undo_stack: vec![],
-            redo_stack: vec![]
+            redo_stack: vec![],
+            checkpoint_requested: false
         }
     }
     
@@ -491,18 +496,16 @@ impl UndoRedoStacks {
     
     pub fn checkpoint(&mut self) -> () {
         self.forget_redos();
-        
-        if self.undo_stack.len() == 0 || self.undo_stack.last().unwrap().changes.len() != 0 {
-            self.undo_stack.push(ChangePacket::new());
-        }
+        self.checkpoint_requested = true;
     }
     
     pub fn push_undo(&mut self, change: Change) -> () {
         self.forget_redos();
         
-        if self.undo_stack.len() == 0 {
+        if self.undo_stack.len() == 0 || self.checkpoint_requested {
             self.undo_stack.push(ChangePacket::new());
         }
+        self.checkpoint_requested = false;
         
         self.undo_stack.last_mut().unwrap().changes.push(change);
     }
@@ -510,14 +513,23 @@ impl UndoRedoStacks {
     /// Returns `(u, r)`, where `u` is the number of undo operations we can perform,
     /// and `r` is the number of redo operations we can perform.
     pub fn depth(&self) -> (usize, usize) {
-        (Self::depth_stack(&self.undo_stack), Self::depth_stack(&self.redo_stack))
+        (self.undo_stack.len(), self.redo_stack.len())
     }
 
-    fn depth_stack(v: &Vec<ChangePacket>) -> usize {
-        v.len() - match v.last() {
-            None => 0,
-            Some(last) => if last.changes.len() == 0 { 1 } else { 0 }
+    pub fn undo_once(&mut self, document: &mut Document) -> Result<(), Oops> {
+        match self.undo_stack.pop() {
+            None => Err(Oops::NoMoreUndos),
+            Some(packet) => {
+                let mut redo_packet = ChangePacket::new();
+                for inverse in packet.changes.iter().rev() {
+                    redo_packet.changes.push(inverse.apply_untracked(document));
+                }
+                
+                self.redo_stack.push(redo_packet);
+                Ok(())
+            }
         }
+        
     }
 }
 
@@ -763,11 +775,25 @@ impl Document {
         }
     }
 
-
+    fn prep_text(text: &str, position: &Position, options: &InsertOptions) -> Vec<Vec<char>> {
+        if options.spacing || options.escapes || options.indent {
+            todo!();
+        }
+        
+        lazy_static!{
+            static ref LINE_SPLIT: Regex = Regex::new(r"\r?\n").unwrap();
+        }
+        
+        let mut lines: Vec<Vec<char>> = vec![];
+        
+        for line in LINE_SPLIT.split(text) {
+            lines.push(line.chars().collect::<Vec<char> >());
+        }
+        
+        lines
+    }
     
-    pub fn insert(&mut self, text: &String, options: &InsertOptions) -> Result<(), Oops> {
-        
-        
+    pub fn insert(&mut self, text: &str, options: &InsertOptions) -> Result<(), Oops> {
         let range = match options.range {
             None => self.selection(),
             Some(r) => {
@@ -778,28 +804,60 @@ impl Document {
             }
         };
 
-        // TODO: process this according to options
-        // TODO: Handle multiple line input
-        let lines = vec![text.chars().collect::<Vec<char>>()];
-
-        if lines.len() == 0 || (lines.len() == 1 && lines[0].len() == 0) {
-            return Err(Oops::EmptyString("can't insert nothing"));
-        }
-
         if !range.empty() {
             todo!();
         }
 
+        let lines = Self::prep_text(text, &range.beginning, options);
+        println!("{:?}", lines);
+
+        if lines.len() == 0 || (lines.len() == 1 && lines[0].len() == 0) {
+            return Err(Oops::EmptyString("can't insert nothing"));
+        }
+     
+        let mut anchor_changes: Vec<Change> = vec![];
+
+        for (handle, anchor) in self.anchors.iter() {
+            if anchor.position >= range.beginning {
+                let mut moved = anchor.clone();
+
+                if moved.position.row == range.beginning.row {
+                    if lines.len() == 1 {
+                        moved.position.column += lines[0].len();
+                    } else {
+                        let past_original = if moved.position.column > range.beginning.column {
+                            moved.position.column - range.beginning.column
+                        } else {
+                            0
+                        };
+                        
+                        moved.position.column = lines[lines.len() - 1].len() + past_original;
+                    }
+                }
+
+                moved.position.row += lines.len() - 1;
+
+                anchor_changes.push(Change::AnchorSet {
+                    handle: *handle,
+                    value: moved
+                });
+            }
+        }
+
         
-        
-        let change = Change::Insert {
+        let inverse = Change::Insert {
             text: lines,
             position: range.beginning
-        };
-        
-        let inverse = change.apply_untracked(self);
+        }.apply_untracked(self);
         self.undo_redo.push_undo(inverse);
 
+        for change in anchor_changes {
+            let inverse = change.apply_untracked(self);
+            self.undo_redo.push_undo(inverse);
+        }
+
+
+        
         Ok(())
     }
         
@@ -1179,6 +1237,36 @@ mod tests {
             }
         );
         assert_eq!(document.text(), "0123be\nABCDE");
+    }
+
+    #[test]
+    fn insert_undo_redo() {
+        let mut document = Document::from("");
+
+        document.insert("Hello", &InsertOptions::exact());
+        assert_eq!(document.text(), "Hello");
+        assert_eq!(document.undo_redo().depth(), (1, 0));
+        assert_eq!(document.cursor().position, Position::from(0, 5));
+        assert_eq!(document.mark().position, Position::from(0, 5));
+
+        document.undo_redo.checkpoint();
+        document.insert("\nthere\ncaptain", &InsertOptions::exact());
+        assert_eq!(document.text(), "Hello\nthere\ncaptain");
+        assert_eq!(document.undo_redo().depth(), (2, 0));
+        assert_eq!(document.cursor().position, Position::from(2, 7));
+        assert_eq!(document.mark().position, Position::from(2, 7));
+        
+        // document.undo_redo.undo_once();
+        // assert_eq!(document.text(), "Hello");
+        // assert_eq!(document.undo_redo().depth(), (1, 1));
+        // assert_eq!(document.cursor().position, Position::from(0, 5));
+        // assert_eq!(document.mark().position, Position::from(0, 5));
+
+        // document.undo_redo.undo_once();
+        // assert_eq!(document.text(), "");
+        // assert_eq!(document.undo_redo().depth(), (0, 2));
+        // assert_eq!(document.cursor().position, Position::from(0, 0));
+        // assert_eq!(document.mark().position, Position::from(0, 0));
     }
 
 }
