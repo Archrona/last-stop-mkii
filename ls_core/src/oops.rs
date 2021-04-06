@@ -7,13 +7,13 @@ use crate::document;
 
 /// Represents a structured failure type.
 /// Typical usage is to return `Result<T, Oops>`.
-#[derive(Debug)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum Oops {
     Ouch(&'static str),
     NonexistentAnchor(document::AnchorHandle),
     CannotRemoveAnchor(document::AnchorHandle),
-    NoMoreUndos,
-    NoMoreRedos,
+    NoMoreUndos(usize),
+    NoMoreRedos(usize),
     InvalidIndex(usize, &'static str),
     InvalidPosition(document::Position, &'static str),
     InvalidRange(document::Range, &'static str),

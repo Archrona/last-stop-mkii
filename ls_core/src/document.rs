@@ -353,7 +353,22 @@ impl InsertOptions {
     pub fn exact_at(range: &Range) -> InsertOptions {
         InsertOptions {
             range: Some(*range),
-            ..InsertOptions::exact()
+            ..Self::exact()
+        }
+    }
+}
+
+impl RemoveOptions {
+    pub fn exact() -> RemoveOptions {
+        RemoveOptions {
+            range: None
+        }
+    }
+
+    pub fn exact_at(range: &Range) -> RemoveOptions {
+        RemoveOptions {
+            range: Some(*range),
+            ..Self::exact()
         }
     }
 }
@@ -449,7 +464,7 @@ impl Change {
     /// not the client code.
     fn apply_untracked(&self, document: &mut Document) -> Change {
         use Change::*;
-    
+
         match self {
             Insert { text, position } =>        document.insert_untracked(&text, position),
             Remove { range } =>                 document.remove_untracked(range),
@@ -514,22 +529,6 @@ impl UndoRedoStacks {
     /// and `r` is the number of redo operations we can perform.
     pub fn depth(&self) -> (usize, usize) {
         (self.undo_stack.len(), self.redo_stack.len())
-    }
-
-    pub fn undo_once(&mut self, document: &mut Document) -> Result<(), Oops> {
-        match self.undo_stack.pop() {
-            None => Err(Oops::NoMoreUndos),
-            Some(packet) => {
-                let mut redo_packet = ChangePacket::new();
-                for inverse in packet.changes.iter().rev() {
-                    redo_packet.changes.push(inverse.apply_untracked(document));
-                }
-                
-                self.redo_stack.push(redo_packet);
-                Ok(())
-            }
-        }
-        
     }
 }
 
@@ -805,11 +804,12 @@ impl Document {
         };
 
         if !range.empty() {
-            todo!();
+            if let Err(oops) = self.remove(&RemoveOptions::exact_at(&range)) {
+                return Err(oops);
+            }
         }
 
         let lines = Self::prep_text(text, &range.beginning, options);
-        println!("{:?}", lines);
 
         if lines.len() == 0 || (lines.len() == 1 && lines[0].len() == 0) {
             return Err(Oops::EmptyString("can't insert nothing"));
@@ -855,14 +855,71 @@ impl Document {
             let inverse = change.apply_untracked(self);
             self.undo_redo.push_undo(inverse);
         }
-
-
         
         Ok(())
     }
+
+
+
+
+
         
     pub fn remove(&mut self, options: &RemoveOptions) -> Result<(), Oops> {
-        todo!();
+        let range = match options.range {
+            None => self.selection(),
+            Some(r) => {
+                if !self.range_valid(&r) {
+                    return Err(Oops::InvalidRange(r, "remove"));
+                }
+                r
+            }
+        };
+
+        if range.empty() {
+            return Err(Oops::InvalidRange(range, "remove - empty"));
+        }
+
+        let mut anchor_changes: Vec<Change> = vec![];
+
+        for (handle, anchor) in self.anchors.iter() {
+            if anchor.position > range.ending {
+                anchor_changes.push(Change::AnchorSet { 
+                    handle: *handle,
+                    value: Anchor {
+                        position: Position::from(
+                            anchor.position.row - (range.ending.row - range.beginning.row),
+                            if anchor.position.row == range.ending.row {
+                                range.beginning.column + anchor.position.column - range.ending.column
+                            } else {
+                                anchor.position.column
+                            }
+                        ),
+                        ..*anchor
+                    }
+                });
+            } else if anchor.position > range.beginning {
+                anchor_changes.push(Change::AnchorSet {
+                    handle: *handle,
+                    value: Anchor {
+                        position: range.beginning,
+                        ..*anchor
+                    }
+                });
+            }
+        }
+
+        
+        let inverse = Change::Remove {
+            range
+        }.apply_untracked(self);
+        self.undo_redo.push_undo(inverse);
+
+        for change in anchor_changes {
+            let inverse = change.apply_untracked(self);
+            self.undo_redo.push_undo(inverse);
+        }
+            
+        Ok(())
     }
     
     pub fn set_anchor(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<(), Oops> {
@@ -898,16 +955,69 @@ impl Document {
     }
     
 
+
+
+    pub fn undo_once(&mut self) -> Result<(), Oops> {
+        match self.undo_redo.undo_stack.pop() {
+            None => Err(Oops::NoMoreUndos(0)),
+            Some(packet) => {
+                let mut redo_packet = ChangePacket::new();
+                for inverse in packet.changes.iter().rev() {
+                    redo_packet.changes.push(inverse.apply_untracked(self));
+                }
+                
+                self.undo_redo.redo_stack.push(redo_packet);
+                Ok(())
+            }
+        }
+    }
+
     pub fn undo(&mut self, quantity: usize) -> Result<usize, Oops> {
-        todo!();
+        for times in 0..quantity {
+            let result = self.undo_once();
+            match result {
+                Ok(_) => (),
+                Err(e) => return Err(Oops::NoMoreUndos(times))
+            }
+        }
+
+        Ok(quantity)
     }
     
+    pub fn redo_once(&mut self) -> Result<(), Oops> {
+        match self.undo_redo.redo_stack.pop() {
+            None => Err(Oops::NoMoreRedos(0)),
+            Some(packet) => {
+                let mut undo_packet = ChangePacket::new();
+                for inverse in packet.changes.iter().rev() {
+                    undo_packet.changes.push(inverse.apply_untracked(self));
+                }
+                
+                self.undo_redo.undo_stack.push(undo_packet);
+                Ok(())
+            }
+        }
+    }
+
     pub fn redo(&mut self, quantity: usize) -> Result<usize, Oops> {
-        todo!();
+        for times in 0..quantity {
+            let result = self.redo_once();
+            match result {
+                Ok(_) => (),
+                Err(e) => return Err(Oops::NoMoreRedos(times))
+            }
+        }
+
+        Ok(quantity)
+    }
+
+    pub fn checkpoint(&mut self) -> () {
+        self.undo_redo.checkpoint();
     }
     
     pub fn forget_undo_redo(&mut self) -> Result<(), Oops> {
-        todo!();
+        self.undo_redo.forget_everything();
+        Ok(())
     }
     
 
@@ -999,12 +1109,7 @@ impl Document {
     
     /// Sets the content of anchor `handle` to `value`.
     /// Returns the `Change` which would undo this modification.
-    ///
-    /// # Panics
-    /// Panics if `handle` is invalid or the anchor would point to an invalid position.
     fn set_anchor_untracked(&mut self, handle: AnchorHandle, value: &Anchor) -> Change {
-        self.assert_position_valid(&value.position);
-
         match self.anchors.set(handle, value) {
             Err(_) => panic!("Tried to set invalid anchor handle {}", handle),
             Ok(original) => Change::AnchorSet { handle, value: original }
@@ -1013,11 +1118,7 @@ impl Document {
     
     /// Inserts a new anchor at `handle` with value `value`.
     /// Returns the `Change` which would undo this modification.
-    ///
-    /// # Panics
-    /// Panics if `handle` exists or if the anchor points to an invalid position.
     fn insert_anchor_untracked(&mut self, handle: AnchorHandle, value: &Anchor) -> Change {
-        self.assert_position_valid(&value.position);
         self.anchors.create(*value, Some(handle));
 
         Change::AnchorRemove { handle }
@@ -1025,9 +1126,6 @@ impl Document {
     
     /// Removes the anchor at `handle`.
     /// Returns the `Change` which would undo this modification.
-    ///
-    /// # Panics
-    /// Panics if `handle` is invalid.
     fn remove_anchor_untracked(&mut self, handle: AnchorHandle) -> Change {
         match self.anchors.remove(handle) {
             Ok(old) => Change::AnchorInsert { handle, value: old },
@@ -1240,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_undo_redo() {
+    fn insert_remove_undo_redo() {
         let mut document = Document::from("");
 
         document.insert("Hello", &InsertOptions::exact());
@@ -1256,17 +1354,44 @@ mod tests {
         assert_eq!(document.cursor().position, Position::from(2, 7));
         assert_eq!(document.mark().position, Position::from(2, 7));
         
-        // document.undo_redo.undo_once();
-        // assert_eq!(document.text(), "Hello");
-        // assert_eq!(document.undo_redo().depth(), (1, 1));
-        // assert_eq!(document.cursor().position, Position::from(0, 5));
-        // assert_eq!(document.mark().position, Position::from(0, 5));
+        assert_eq!(document.undo(1).unwrap(), 1);
+        assert_eq!(document.text(), "Hello");
+        assert_eq!(document.undo_redo().depth(), (1, 1));
+        assert_eq!(document.cursor().position, Position::from(0, 5));
+        assert_eq!(document.mark().position, Position::from(0, 5));
 
-        // document.undo_redo.undo_once();
-        // assert_eq!(document.text(), "");
-        // assert_eq!(document.undo_redo().depth(), (0, 2));
-        // assert_eq!(document.cursor().position, Position::from(0, 0));
-        // assert_eq!(document.mark().position, Position::from(0, 0));
+        assert_eq!(document.undo(1).unwrap(), 1);
+        assert_eq!(document.text(), "");
+        assert_eq!(document.undo_redo().depth(), (0, 2));
+        assert_eq!(document.cursor().position, Position::from(0, 0));
+        assert_eq!(document.mark().position, Position::from(0, 0));
+
+        assert_eq!(document.undo(1).unwrap_err(), Oops::NoMoreUndos(0));
+
+        assert_eq!(document.undo_redo().depth(), (0, 2));
+        assert_eq!(document.redo(100).unwrap_err(), Oops::NoMoreRedos(2));
+        assert_eq!(document.undo_redo().depth(), (2, 0));
+        assert_eq!(document.text(), "Hello\nthere\ncaptain");
+        assert_eq!(document.undo_redo().depth(), (2, 0));
+        assert_eq!(document.cursor().position, Position::from(2, 7));
+        assert_eq!(document.mark().position, Position::from(2, 7));
+        
+        document.checkpoint();
+        document.remove(&RemoveOptions::exact_at(&Range::from(0, 2, 2, 1)));
+        assert_eq!(document.undo_redo().depth(), (3, 0));
+        assert_eq!(document.text(), "Heaptain");
+        assert_eq!(document.cursor().position, Position::from(0, 8));
+        assert_eq!(document.mark().position, Position::from(0, 8));
+        
+        assert_eq!(document.undo(1).unwrap(), 1);
+        assert_eq!(document.text(), "Hello\nthere\ncaptain");
+        assert_eq!(document.cursor().position, Position::from(2, 7));
+
+        document.insert("ooo", &InsertOptions::exact_at(&Range::from(1, 1, 2, 3)));
+        assert_eq!(document.text(), "Hello\ntoootain");
+        assert_eq!(document.undo_redo().depth(), (2, 0));
+        assert_eq!(document.cursor().position, Position::from(1, 8));
+
     }
 
 }
