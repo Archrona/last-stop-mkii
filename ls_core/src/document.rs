@@ -374,9 +374,16 @@ impl RemoveOptions {
 }
 
 impl Anchor {
-    fn new() -> Anchor {
+    pub fn new() -> Anchor {
         Anchor {
             position: Default::default()
+        }
+    }
+
+    pub fn from(row: usize, column: usize) -> Anchor {
+        Anchor {
+            position: Position::from(row, column),
+            ..Default::default()
         }
     }
 }
@@ -424,11 +431,7 @@ impl Anchors {
     
     fn create(&mut self, anchor: Anchor, force_handle: Option<AnchorHandle>) -> AnchorHandle {
         let handle = match force_handle {
-            None => {
-                let id = self.next_id;
-                self.next_id += 1;
-                id
-            },
+            None => self.get_new_handle(),
             Some(h) => h
         };              
         
@@ -449,6 +452,12 @@ impl Anchors {
 
     fn iter(&self) -> hash_map::Iter<'_, AnchorHandle, Anchor> {
         self.store.iter()
+    }
+
+    fn get_new_handle(&mut self) -> AnchorHandle {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 }
 
@@ -774,6 +783,7 @@ impl Document {
         }
     }
 
+    #[allow(unused_variables)]
     fn prep_text(text: &str, position: &Position, options: &InsertOptions) -> Vec<Vec<char>> {
         if options.spacing || options.escapes || options.indent {
             todo!();
@@ -923,38 +933,78 @@ impl Document {
     }
     
     pub fn set_anchor(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<(), Oops> {
-        todo!();
+        if let None = self.anchors.get(handle) {
+            return Err(Oops::NonexistentAnchor(handle));
+        }
+        if !self.position_valid(&value.position) {
+            return Err(Oops::InvalidPosition(value.position, "set_anchor"));
+        }
+
+        let inverse = self.set_anchor_untracked(handle, value);
+        self.undo_redo.push_undo(inverse);
+
+        Ok(())
     }
     
-    pub fn create_anchor(&mut self, position: &Position) -> Result<AnchorHandle, Oops> {
-        todo!();
+    pub fn create_anchor(&mut self, anchor: &Anchor) -> Result<AnchorHandle, Oops> {
+        if !self.position_valid(&anchor.position) {
+            return Err(Oops::InvalidPosition(anchor.position, "create_anchor"));
+        }
+
+        let handle = self.anchors.get_new_handle();
+        let inverse = self.insert_anchor_untracked(handle, anchor);
+        self.undo_redo.push_undo(inverse);
+
+        Ok(handle)
     }
     
     pub fn set_cursor(&mut self, position: &Position) -> Result<(), Oops> {
-        todo!();
+        self.set_anchor(Anchors::CURSOR, &Anchor {
+            position: *position,
+            ..*self.anchors.get(Anchors::CURSOR).unwrap()
+        })
     }
     
     pub fn set_mark(&mut self, position: &Position) -> Result<(), Oops> {
-        todo!();
+        self.set_anchor(Anchors::MARK, &Anchor {
+            position: *position,
+            ..*self.anchors.get(Anchors::MARK).unwrap()
+        })
     }
     
     pub fn set_cursor_and_mark(&mut self, position: &Position) -> Result<(), Oops> {
-        todo!();
+        self.set_cursor(position)?;
+        self.set_mark(position)?;
+        Ok(())
     }
     
     pub fn set_selection(&mut self, range: &Range) -> Result<(), Oops> {
-        todo!();
+        if !self.range_valid(range) {
+            Err(Oops::InvalidRange(*range, "set_selection"))
+        } else {
+            self.set_mark(&range.beginning)?;
+            self.set_cursor(&range.ending)?;
+            Ok(())
+        }
     }
     
     pub fn remove_anchor(&mut self, handle: AnchorHandle) -> Result<(), Oops> {
-        todo!();
+        if let None = self.anchors.get(handle) {
+            return Err(Oops::NonexistentAnchor(handle));
+        }
+
+        let inverse = self.remove_anchor_untracked(handle);
+
+        self.undo_redo.push_undo(inverse);
+        Ok(())
     }
     
     pub fn set_indentation(&mut self, indentation: &Indentation) -> Result<(), Oops> {
-        todo!();
+        let inverse = self.set_indentation_untracked(indentation);
+        self.undo_redo.push_undo(inverse);
+        Ok(())
     }
     
-
 
 
     pub fn undo_once(&mut self) -> Result<(), Oops> {
@@ -977,7 +1027,7 @@ impl Document {
             let result = self.undo_once();
             match result {
                 Ok(_) => (),
-                Err(e) => return Err(Oops::NoMoreUndos(times))
+                Err(_) => return Err(Oops::NoMoreUndos(times))
             }
         }
 
@@ -1004,7 +1054,7 @@ impl Document {
             let result = self.redo_once();
             match result {
                 Ok(_) => (),
-                Err(e) => return Err(Oops::NoMoreRedos(times))
+                Err(_) => return Err(Oops::NoMoreRedos(times))
             }
         }
 
@@ -1341,14 +1391,14 @@ mod tests {
     fn insert_remove_undo_redo() {
         let mut document = Document::from("");
 
-        document.insert("Hello", &InsertOptions::exact());
+        document.insert("Hello", &InsertOptions::exact()).unwrap();
         assert_eq!(document.text(), "Hello");
         assert_eq!(document.undo_redo().depth(), (1, 0));
         assert_eq!(document.cursor().position, Position::from(0, 5));
         assert_eq!(document.mark().position, Position::from(0, 5));
 
         document.undo_redo.checkpoint();
-        document.insert("\nthere\ncaptain", &InsertOptions::exact());
+        document.insert("\nthere\ncaptain", &InsertOptions::exact()).unwrap();
         assert_eq!(document.text(), "Hello\nthere\ncaptain");
         assert_eq!(document.undo_redo().depth(), (2, 0));
         assert_eq!(document.cursor().position, Position::from(2, 7));
@@ -1377,7 +1427,7 @@ mod tests {
         assert_eq!(document.mark().position, Position::from(2, 7));
         
         document.checkpoint();
-        document.remove(&RemoveOptions::exact_at(&Range::from(0, 2, 2, 1)));
+        document.remove(&RemoveOptions::exact_at(&Range::from(0, 2, 2, 1))).unwrap();
         assert_eq!(document.undo_redo().depth(), (3, 0));
         assert_eq!(document.text(), "Heaptain");
         assert_eq!(document.cursor().position, Position::from(0, 8));
@@ -1387,11 +1437,79 @@ mod tests {
         assert_eq!(document.text(), "Hello\nthere\ncaptain");
         assert_eq!(document.cursor().position, Position::from(2, 7));
 
-        document.insert("ooo", &InsertOptions::exact_at(&Range::from(1, 1, 2, 3)));
+        document.insert("ooo", &InsertOptions::exact_at(&Range::from(1, 1, 2, 3))).unwrap();
         assert_eq!(document.text(), "Hello\ntoootain");
         assert_eq!(document.undo_redo().depth(), (2, 0));
         assert_eq!(document.cursor().position, Position::from(1, 8));
 
+        document.forget_undo_redo().unwrap();
+        assert_eq!(document.undo_redo().depth(), (0, 0));
+    }
+
+    #[test]
+    fn anchors() {
+        let mut document = Document::from("AAA\nBBB\nCCC");
+        
+        let a = document.create_anchor(&Anchor::from(0, 0)).unwrap();
+        let b = document.create_anchor(&Anchor::from(0, 2)).unwrap();
+        let c = document.create_anchor(&Anchor::from(1, 1)).unwrap();
+        let d = document.create_anchor(&Anchor::from(1, 3)).unwrap();
+        let e = document.create_anchor(&Anchor::from(2, 0)).unwrap();
+        let f = document.create_anchor(&Anchor::from(2, 2)).unwrap();
+        document.insert("Hello\nThere", &InsertOptions::exact_at(&Range::from(1, 0, 1, 0))).unwrap();
+
+        document.checkpoint();
+        assert_eq!(document.text(), "AAA\nHello\nThereBBB\nCCC");
+        assert_eq!(document.anchor(a).unwrap().position, Position::from(0, 0));
+        assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 2));
+        assert_eq!(document.anchor(c).unwrap().position, Position::from(2, 6));
+        assert_eq!(document.anchor(d).unwrap().position, Position::from(2, 8));
+        assert_eq!(document.anchor(e).unwrap().position, Position::from(3, 0));
+        assert_eq!(document.anchor(f).unwrap().position, Position::from(3, 2));
+
+        assert_eq!(document.indentation, Indentation::spaces(4));
+        document.set_indentation(&Indentation::tabs(2)).unwrap();
+        assert_eq!(document.indentation, Indentation::tabs(2));
+
+        document.remove(&RemoveOptions::exact_at(&Range::from(2, 5, 2, 6))).unwrap();
+        assert_eq!(document.text(), "AAA\nHello\nThereBB\nCCC");
+        assert_eq!(document.anchor(a).unwrap().position, Position::from(0, 0));
+        assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 2));
+        assert_eq!(document.anchor(c).unwrap().position, Position::from(2, 5));
+        assert_eq!(document.anchor(d).unwrap().position, Position::from(2, 7));
+        assert_eq!(document.anchor(e).unwrap().position, Position::from(3, 0));
+        assert_eq!(document.anchor(f).unwrap().position, Position::from(3, 2));
+        
+        document.remove(&RemoveOptions::exact_at(&Range::from(0, 1, 1, 0))).unwrap();
+        document.remove_anchor(a).unwrap();
+
+        assert_eq!(document.text(), "AHello\nThereBB\nCCC");
+        assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 1));
+        assert_eq!(document.anchor(c).unwrap().position, Position::from(1, 5));
+        assert_eq!(document.anchor(d).unwrap().position, Position::from(1, 7));
+        assert_eq!(document.anchor(e).unwrap().position, Position::from(2, 0));
+        assert_eq!(document.anchor(f).unwrap().position, Position::from(2, 2));
+        
+        document.remove(&RemoveOptions::exact_at(&Range::from(1, 5, 2, 1))).unwrap();
+        assert_eq!(document.text(), "AHello\nThereCC");
+        assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 1));
+        assert_eq!(document.anchor(c).unwrap().position, Position::from(1, 5));
+        assert_eq!(document.anchor(d).unwrap().position, Position::from(1, 5));
+        assert_eq!(document.anchor(e).unwrap().position, Position::from(1, 5));
+        assert_eq!(document.anchor(f).unwrap().position, Position::from(1, 6));
+        
+        
+        document.undo(1).unwrap();
+        assert_eq!(document.undo_redo().depth(), (1, 1));
+        assert_eq!(document.text(), "AAA\nHello\nThereBBB\nCCC");
+        assert_eq!(document.anchor(a).unwrap().position, Position::from(0, 0));
+        assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 2));
+        assert_eq!(document.anchor(c).unwrap().position, Position::from(2, 6));
+        assert_eq!(document.anchor(d).unwrap().position, Position::from(2, 8));
+        assert_eq!(document.anchor(e).unwrap().position, Position::from(3, 0));
+        assert_eq!(document.anchor(f).unwrap().position, Position::from(3, 2));
+
+        assert_eq!(document.indentation, Indentation::spaces(4));
     }
 
 }
