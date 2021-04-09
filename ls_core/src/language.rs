@@ -10,6 +10,8 @@ use tree_sitter_typescript;
 use tree_sitter_bash;
 use lazy_static::lazy_static;
 
+use crate::document;
+
 lazy_static! {
     static ref LANGUAGES: [(&'static str, tree_sitter::Language); 8] = {[
         ("rs", tree_sitter_rust::language()),
@@ -35,11 +37,11 @@ pub fn get_parser(lang_str: &str) -> Option<tree_sitter::Parser> {
     None
 }
 
-fn pp_rec(node: &tree_sitter::Node, out: String, depth: i32) -> String {
+fn pp_rec(node: &tree_sitter::Node, out: String, depth: i32, doc: &document::Document) -> String {
     let mut result = out;
 
     for _ in 0..=depth {
-        result += "  ";
+        result += "   ";
     }
 
     result += node.kind();
@@ -50,14 +52,20 @@ fn pp_rec(node: &tree_sitter::Node, out: String, depth: i32) -> String {
         range.end_point.row, range.end_point.column
     );
 
+    if range.end_point.row == range.start_point.row {
+        let line = doc.line(range.start_point.row).unwrap();
+        result += &format!(" \"{}\"", 
+            line[range.start_point.column..range.end_point.column].to_string());
+    }
+
     result += "\n";
     for i in 0..node.child_count() {
-        result = pp_rec(&node.child(i).unwrap(), result, depth + 1);
+        result = pp_rec(&node.child(i).unwrap(), result, depth + 1, doc);
     }
 
     result
 }
 
-pub fn pretty_print(node: &tree_sitter::Node) -> String {
-    pp_rec(node, String::new(), 0i32)
+pub fn pretty_print(node: &tree_sitter::Node, doc: &document::Document) -> String {
+    pp_rec(node, String::new(), 0i32, doc)
 }
