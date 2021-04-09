@@ -1,5 +1,5 @@
 
-pub mod ts_interface;
+pub mod language;
 pub mod document;
 pub mod oops;
 
@@ -12,17 +12,6 @@ pub fn initialize() {
 #[wasm_bindgen]
 pub fn dbl(x: f64) -> f64 {
     return x * 2.0;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dbl() {
-        assert_eq!(dbl(10.0), 20.0);
-        assert_eq!(dbl(-6.0), -12.0);
-    }
 }
 
 #[allow(dead_code)]

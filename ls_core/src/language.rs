@@ -1,4 +1,4 @@
-// ts_interface.rs
+//! Support for intelligent parsing / understanding of source code
 
 use tree_sitter;
 use tree_sitter_rust;

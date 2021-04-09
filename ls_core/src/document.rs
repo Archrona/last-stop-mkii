@@ -7,6 +7,7 @@ use crate::oops::Oops;
 use std::collections::hash_map;
 use regex::Regex;
 use lazy_static::lazy_static;
+use std::ops::{Bound, RangeBounds};
 
 
 //-----------------------------------------------------------------------------
@@ -100,7 +101,7 @@ pub enum Change {
 
     /// Represents inserting `text` at `position` - literally, no escapes,
     /// exactly the characters that get inserted.
-    Insert { text: Vec<Vec<char>>, position: Position },
+    Insert { text: Vec<String>, position: Position },
 
     /// Represents removing the text within `range`.
     Remove { range: Range },
@@ -142,19 +143,19 @@ pub struct InsertOptions {
     /// $n (newline), $g (glue), and so forth?
     /// 
     /// These escapes are used by speech editing to perform special operations.
-    escapes: bool,
+    pub escapes: bool,
 
     /// Should the insert automatically indent Lines after the first?
-    indent: bool,
+    pub indent: bool,
 
     /// Should the insert attempt to either insert or remove whitespace
     /// immediately before and immediately after the inserted content
     /// in a language-specific manner?
-    spacing: bool,
+    pub spacing: bool,
 
     /// If `None`, the insert takes place between the cursor and mark.
     /// Otherwise, the insert takes place at this range.
-    range: Option<Range>
+    pub range: Option<Range>
 }
 
 
@@ -163,7 +164,7 @@ pub struct InsertOptions {
 pub struct RemoveOptions {
     /// If `None`, the removal takes place between the cursor and mark.
     /// Otherwise, this range is removed.
-    range: Option<Range>
+    pub range: Option<Range>
 }
 
 /// An opaque-ish handle which acts as a unique key within a document for
@@ -207,6 +208,14 @@ pub struct UndoRedoStacks {
     checkpoint_requested: bool
 }
 
+/// A line of text stored in a document. Maintains its own length so that
+/// we do not have to make O(n) queries to `.chars().count()`.
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
+pub struct Line {
+    pub content: String,
+    pub length: usize
+}
+
 /// A buffer of text organized into lines. Equipped with undo, redo, and anchors.
 /// The top-level struct for this module.
 ///
@@ -214,7 +223,7 @@ pub struct UndoRedoStacks {
 /// to spend much of their time working with this type.
 #[derive(Clone, Debug)]
 pub struct Document {
-    lines: Vec<Vec<char>>,
+    lines: Vec<Line>,
     anchors: Anchors,
     indentation: Indentation,
     undo_redo: UndoRedoStacks
@@ -223,6 +232,14 @@ pub struct Document {
 
 
 //-----------------------------------------------------------------------------
+
+impl Line {
+    /// Returns the line containing `content`.
+    pub fn from(content: String) -> Line {
+        let length = content.chars().count();
+        Line { content, length }
+    }
+}
 
 impl Position {
     /// Returns the position `(row, column)`.
@@ -269,7 +286,7 @@ impl Indentation {
     /// ```
     /// use ls_core::document::*;
     /// let indent = Indentation::spaces(3);
-    /// assert_eq!(indent.produce(6), "      ".chars().collect::<Vec<char>>());
+    /// assert_eq!(indent.produce(6), "      ");
     /// ```
     pub fn spaces(count: usize) -> Indentation {
         if count == 0 {
@@ -295,8 +312,8 @@ impl Indentation {
     /// ```
     /// use ls_core::document::*;
     /// let indent = Indentation::tabs(3);
-    /// assert_eq!(indent.produce(6), "\t\t".chars().collect::<Vec<char>>());
-    /// assert_eq!(indent.produce(11), "\t\t\t  ".chars().collect::<Vec<char>>());
+    /// assert_eq!(indent.produce(6), "\t\t");
+    /// assert_eq!(indent.produce(11), "\t\t\t  ");
     /// ```
     pub fn tabs(spaces_per_tab: usize) -> Indentation {
         if spaces_per_tab == 0 {
@@ -317,19 +334,19 @@ impl Indentation {
     /// ```
     /// use ls_core::document::*;
     /// let indent = Indentation::spaces(2);
-    /// assert_eq!(indent.measure(&"    ".chars().collect::<Vec<char>>()), (4, 4));
-    /// assert_eq!(indent.measure(&"\t\t Hello \t there".chars().collect::<Vec<char>>()), (5, 3));
+    /// assert_eq!(indent.measure("    "), (4, 4));
+    /// assert_eq!(indent.measure("\t\t Hello \t there"), (5, 3));
     /// ```
-    pub fn measure(&self, line: &Vec<char>) -> (usize, usize) {
+    pub fn measure(&self, line: &str) -> (usize, usize) {
         let mut spaces: usize = 0;
         
-        for (col, c) in line.iter().enumerate() {
-            if *c == ' ' {
+        for (byte, c) in line.char_indices() {
+            if c == ' ' {
                 spaces += 1;
-            } else if *c == '\t' {
+            } else if c == '\t' {
                 spaces += self.spaces_per_tab;
             } else {
-                return (spaces, col);
+                return (spaces, byte);
             }
         }
         
@@ -341,12 +358,12 @@ impl Indentation {
     ///
     /// If this `Indentation` uses tabs and the requested number of spaces is not a
     /// multiple of `spaces_per_tab`, spaces will be used to complete the left margin.
-    pub fn produce(&self, spaces: usize) -> Vec<char> {
+    pub fn produce(&self, spaces: usize) -> String {
         if self.use_spaces {
-            [' '].repeat(spaces)
+            " ".repeat(spaces)
         } else {
-            let mut result = ['\t'].repeat(spaces / self.spaces_per_tab);
-            result.extend_from_slice(&[' '].repeat(spaces % self.spaces_per_tab));
+            let mut result = "\t".repeat(spaces / self.spaces_per_tab);
+            result.push_str(&" ".repeat(spaces % self.spaces_per_tab));
             result
         }
     }
@@ -362,23 +379,23 @@ impl Indentation {
     ///
     /// ```
     /// use ls_core::document::*;
-    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), -1, true), "Hello".chars().collect::<Vec<char>>());
-    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), -1, false), "".chars().collect::<Vec<char>>());
-    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), 1, true), "        Hello".chars().collect::<Vec<char>>());
-    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello".chars().collect::<Vec<char>>(), 1, false), "        ".chars().collect::<Vec<char>>());
-    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), -1, true), " Hello".chars().collect::<Vec<char>>());
-    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), -1, false), " ".chars().collect::<Vec<char>>());
-    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), 1, true), "\t\t Hello".chars().collect::<Vec<char>>());
-    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello".chars().collect::<Vec<char>>(), 1, false), "\t\t ".chars().collect::<Vec<char>>());
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello", -1, true), "Hello");
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello", -1, false), "");
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello", 1, true), "        Hello");
+    /// assert_eq!(Indentation::spaces(4).indent(&"    Hello", 1, false), "        ");
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello", -1, true), " Hello");
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello", -1, false), " ");
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello", 1, true), "\t\t Hello");
+    /// assert_eq!(Indentation::tabs(4).indent(&"     Hello", 1, false), "\t\t ");
     /// ```
-    pub fn indent(&self, line: &Vec<char>, indent_delta: isize, include_content: bool) -> Vec<char> {
-        let (spaces, col) = self.measure(line);
+    pub fn indent(&self, line: &str, indent_delta: isize, include_content: bool) -> String {
+        let (spaces, byte_cutoff) = self.measure(line);
         let requested_spaces: isize = (spaces as isize) + indent_delta * (self.spaces_per_tab as isize);
         let actual_spaces: usize = if requested_spaces < 0 { 0 } else { requested_spaces as usize };
         
         let mut result = self.produce(actual_spaces);
         if include_content {
-            result.extend_from_slice(&line[col..]);
+            result.push_str(&line[byte_cutoff..]);
         }
         
         result
@@ -398,7 +415,7 @@ impl InsertOptions {
     }
     
     /// Returns insert options which indicate the inserted text should be placed into
-    /// the document with no escapes, indentation, or spacing at [`range`].
+    /// the document with no escapes, indentation, or spacing at `range`.
     pub fn exact_at(range: &Range) -> InsertOptions {
         InsertOptions {
             range: Some(*range),
@@ -416,7 +433,7 @@ impl RemoveOptions {
         }
     }
 
-    /// Returns remove options which indicate a normal removal at [`range`] with no
+    /// Returns remove options which indicate a normal removal at `range` with no
     /// special options.
     pub fn exact_at(range: &Range) -> RemoveOptions {
         RemoveOptions {
@@ -651,7 +668,7 @@ impl Document {
     /// ```
     pub fn new() -> Document {
         Document {
-            lines: vec![vec![]],
+            lines: vec![Line::from(String::from(""))],
             anchors: Anchors::new(),
             indentation: Indentation::spaces(4),
             undo_redo: UndoRedoStacks::new()
@@ -663,7 +680,7 @@ impl Document {
     /// and initializes them both to (0, 0).
     ///
     /// The resulting document is guaranteed to have at least one line, even if it is
-    /// just the empty line. Trailing newlines are stripped ainnd the final empty line
+    /// just the empty line. Trailing newlines are stripped and the final empty line
     /// is not included.
     ///
     /// # Examples
@@ -678,15 +695,15 @@ impl Document {
     /// use ls_core::document::*;
     /// let empty = Document::from("Hello\n  there!\n");
     /// assert_eq!(*empty.lines(), vec![
-    ///     "Hello".chars().collect::<Vec<char>>(),
-    ///     "  there!".chars().collect::<Vec<char>>()
+    ///     Line::from("Hello".to_string()),
+    ///     Line::from("  there!".to_string())
     /// ]);
     /// ```
     pub fn from(text: &str) -> Document {
-        let lines: Vec<Vec<char>> = if text == "" {
-            vec![vec![]]
+        let lines: Vec<Line> = if text == "" {
+            vec![Line::from(String::new())]
         } else {
-            text.lines().map(|x| x.chars().collect::<Vec<char>>()).collect()
+            text.lines().map(|x| Line::from(String::from(x))).collect()
         };
 
         Document { 
@@ -710,7 +727,7 @@ impl Document {
     /// assert_eq!(false, document.position_valid(&Position { row: 2, column: 0 }));
     /// ```
     pub fn position_valid(&self, position: &Position) -> bool {
-        position.row < self.lines.len() && position.column <= self.lines[position.row].len()
+        position.row < self.lines.len() && position.column <= self.lines[position.row].length
     }
 
     /// Returns whether `range` is legal in this document. Both its beginning and new and
@@ -741,11 +758,11 @@ impl Document {
     }
 
     /// Returns the `index`th line as a `&String`, or `None` if out of bounds.
-    pub fn line(&self, index: usize) -> Option<String> {
+    pub fn line(&self, index: usize) -> Option<&String> {
         if index >= self.lines.len() {
             None
         } else {
-            Some(self.lines[index].iter().copied().collect())
+            Some(&self.lines[index].content)
         }
     }
 
@@ -756,12 +773,10 @@ impl Document {
     /// ```
     /// use ls_core::document::*;
     /// let document = Document::from("Hello\nthere");
-    /// assert_eq!(*document.lines(), vec![
-    ///     "Hello".chars().collect::<Vec<char>>(),
-    ///     "there".chars().collect::<Vec<char>>()
-    /// ]);
+    /// assert_eq!(document.lines()[0].content, "Hello");
+    /// assert_eq!(document.lines()[1].content, "there");
     /// ```
-    pub fn lines(&self) -> &Vec<Vec<char>> {
+    pub fn lines(&self) -> &Vec<Line> {
         &self.lines
     }
 
@@ -831,9 +846,17 @@ impl Document {
     /// assert_eq!(document.text(), "Hello\nthere\ncaptain!".to_string());
     /// ```
     pub fn text(&self) -> String {
-        self.lines.iter().map(|x| x.iter().collect::<String>())
-            .collect::<Vec<String>>().join("\n")
-    }
+        let mut result = String::new();
+
+        for line in &self.lines {
+            if result.len() > 0 {
+                result.push('\n');
+            }
+            result.push_str(&line.content);
+        }
+
+        result
+    } 
 
     /// Returns the range as a single string with lines separated by "\n",
     /// or None if the range is invalid.
@@ -858,30 +881,31 @@ impl Document {
             let mut s = String::new();
 
             if range.beginning.row == range.ending.row {
-                s.extend(
-                    self.lines[range.beginning.row][range.beginning.column..range.ending.column]
-                    .iter()
-                );
+                s.extend(self.lines[range.beginning.row].content.chars()
+                        .skip(range.beginning.column)
+                        .take(range.ending.column - range.beginning.column));
             } else {
-                s.extend(self.lines[range.beginning.row][range.beginning.column..].iter());
+                s.extend(self.lines[range.beginning.row].content.chars()
+                        .skip(range.beginning.column));
 
                 for line in self.lines[(range.beginning.row + 1)..range.ending.row].iter() {
                     s += "\n";
-                    s.extend(line.iter());
+                    s += &line.content;
                 }
 
                 s += "\n";
-                s.extend(self.lines[range.ending.row][..range.ending.column].iter());
+                s.extend(self.lines[range.ending.row].content.chars()
+                        .take(range.ending.column));
             }
 
             Some(s)
         }
     }
 
-    /// Returs a `Vec<Vec<char>>` prepared for insertion from `text`, a `&str`,
+    /// Returs a `Vec<String>` prepared for insertion from `text`, a `&str`,
     /// under insert options `options` at `position`.
     #[allow(unused_variables)]
-    fn prep_text(text: &str, position: &Position, options: &InsertOptions) -> Vec<Vec<char>> {
+    fn prep_text(text: &str, position: &Position, options: &InsertOptions) -> Vec<String> {
         if options.spacing || options.escapes || options.indent {
             todo!();
         }
@@ -890,10 +914,10 @@ impl Document {
             static ref LINE_SPLIT: Regex = Regex::new(r"\r?\n").unwrap();
         }
         
-        let mut lines: Vec<Vec<char>> = vec![];
+        let mut lines: Vec<String> = vec![];
         
         for line in LINE_SPLIT.split(text) {
-            lines.push(line.chars().collect::<Vec<char> >());
+            lines.push(String::from(line));
         }
         
         lines
@@ -931,7 +955,7 @@ impl Document {
 
                 if moved.position.row == range.beginning.row {
                     if lines.len() == 1 {
-                        moved.position.column += lines[0].len();
+                        moved.position.column += lines[0].chars().count();
                     } else {
                         let past_original = if moved.position.column > range.beginning.column {
                             moved.position.column - range.beginning.column
@@ -939,7 +963,7 @@ impl Document {
                             0
                         };
                         
-                        moved.position.column = lines[lines.len() - 1].len() + past_original;
+                        moved.position.column = lines[lines.len() - 1].chars().count() + past_original;
                     }
                 }
 
@@ -1207,30 +1231,41 @@ impl Document {
     ///
     /// # Panics
     /// Panics if asked to insert 0 lines or if `position` is out of range.
-    fn insert_untracked(&mut self, text: &Vec<Vec<char>>, position: &Position) -> Change {
+    #[allow(unused_assignments)]
+    fn insert_untracked(&mut self, text: &Vec<String>, position: &Position) -> Change {
         if text.len() == 0 {
             panic!("cannot insert 0 lines");
         }
         self.assert_position_valid(position);
 
-        let after = self.lines[position.row].drain(position.column..).collect::<Vec<char>>();
+        let after = self.lines[position.row].content.chars().skip(position.column).collect::<String>();
+        let before = self.lines[position.row].content.chars().take(position.column).collect::<String>();
+        let mut col = 0;
 
         if text.len() == 1 {
-            self.lines[position.row].extend(text[0].iter());
-            self.lines[position.row].extend(after.iter());
+            self.lines[position.row].content = before + &text[0];
+            col = self.lines[position.row].content.chars().count();
+
+            self.lines[position.row].content += &after;
+            self.lines[position.row].length = self.lines[position.row].content.chars().count();
         } else {
-            self.lines[position.row].extend(text[0].iter());
-            let to_append = text.iter().skip(1).cloned().collect::<Vec<Vec<char>>>();
+            self.lines[position.row].content = before + &text[0];
+            self.lines[position.row].length = self.lines[position.row].content.chars().count();
+
+            let to_append = text.into_iter().skip(1).map(|x| Line::from(x.clone())).collect::<Vec<Line>>();
             
             push_all_at(&mut self.lines, position.row + 1, &to_append);
-            self.lines[position.row + text.len() - 1].extend(after.iter());
+
+            col = self.lines[position.row + text.len() - 1].length;
+            self.lines[position.row + text.len() - 1].content += &after;
+            self.lines[position.row + text.len() - 1].length += after.chars().count();
         }
 
         Change::Remove { range: Range {
             beginning: *position,
             ending: Position { 
                 row: position.row + text.len() - 1,
-                column: text[text.len() - 1].len()
+                column: col
             }
         }}
     }
@@ -1246,31 +1281,49 @@ impl Document {
         self.assert_range_valid(range);
 
         if range.beginning.row == range.ending.row {
+            let original = self.lines[range.beginning.row].content.substring(
+                range.beginning.column, range.ending.column - range.beginning.column
+            ).to_string();
+
+            self.lines[range.beginning.row] = Line::from(
+                self.lines[range.beginning.row].content.slice(
+                    ..range.beginning.column
+                ).to_string() +
+                &self.lines[range.beginning.row].content.slice(
+                    range.ending.column..
+                )
+            );
+
             Change::Insert {
-                text: vec![self.lines[range.beginning.row]
-                    .drain(range.beginning.column..range.ending.column)
-                    .collect::<Vec<char>>()],
+                text: vec![original],
                 position: range.beginning
             }
         } else {
-            let mut lines = Vec::new();
+            let mut lines: Vec<String> = Vec::new();
 
             lines.push(
-                self.lines[range.beginning.row]
-                    .drain(range.beginning.column..)
-                    .collect::<Vec<char>>()
+                self.lines[range.beginning.row].content.slice(range.beginning.column..).to_string()
             );
 
-            let trailing = self.lines[range.ending.row]
-                .drain(range.ending.column..)
-                .collect::<Vec<char>>();
+            self.lines[range.beginning.row].content = self.lines[range.beginning.row].content.substring(
+                0, range.beginning.column
+            ).to_string();
 
-            self.lines[range.beginning.row].extend(trailing);
+            let trailing = self.lines[range.ending.row].content
+                .slice(range.ending.column..)
+                .to_string();
+
+            self.lines[range.ending.row].content = 
+                self.lines[range.ending.row].content.substring(0, range.ending.column).to_string();
+
+            self.lines[range.beginning.row].content += &trailing;
+            self.lines[range.beginning.row].length = 
+                self.lines[range.beginning.row].content.chars().count();
 
             lines.extend(
                 self.lines
                     .drain((range.beginning.row + 1)..= range.ending.row)
-                    .map(|x| x.iter().copied().collect::<Vec<char>>())
+                    .map(|x| x.content)
             );
 
             Change::Insert {
@@ -1373,6 +1426,52 @@ pub fn push_all_at<T>(v: &mut Vec<T>, mut offset: usize, s: &[T]) where T: Clone
     }
 }
 
+/// Author: carlomilanesi
+/// https://users.rust-lang.org/t/how-to-get-a-substring-of-a-string/1351/11
+trait StringUtils {
+    fn substring(&self, start: usize, len: usize) -> &str;
+    fn slice(&self, range: impl RangeBounds<usize>) -> &str;
+}
+
+impl StringUtils for str {
+    fn substring(&self, start: usize, len: usize) -> &str {
+        let mut char_pos = 0;
+        let mut byte_start = 0;
+        let mut it = self.chars();
+        loop {
+            if char_pos == start { break; }
+            if let Some(c) = it.next() {
+                char_pos += 1;
+                byte_start += c.len_utf8();
+            }
+            else { break; }
+        }
+        char_pos = 0;
+        let mut byte_end = byte_start;
+        loop {
+            if char_pos == len { break; }
+            if let Some(c) = it.next() {
+                char_pos += 1;
+                byte_end += c.len_utf8();
+            }
+            else { break; }
+        }
+        &self[byte_start..byte_end]
+    }
+
+    fn slice(&self, range: impl RangeBounds<usize>) -> &str {
+        let start = match range.start_bound() {
+            Bound::Included(bound) | Bound::Excluded(bound) => *bound,
+            Bound::Unbounded => 0,
+        };
+        let len = match range.end_bound() {
+            Bound::Included(bound) => *bound + 1,
+            Bound::Excluded(bound) => *bound,
+            Bound::Unbounded => self.len(),
+        } - start;
+        self.substring(start, len)
+    }
+}
 
 
 //-----------------------------------------------------------------------------
@@ -1451,10 +1550,11 @@ mod tests {
     #[test]
     fn unicode() {
         let mut document = Document::from("🙈我爱unicode🦄\n매우 짜증나");
-        assert_eq!(document.lines()[0][0], '🙈');
-        assert_eq!(document.lines()[0][1], '我');
-        assert_eq!(document.lines()[0][10], '🦄');
-        assert_eq!(document.lines()[1][1], '우');
+        assert_eq!(document.lines()[0].content, "🙈我爱unicode🦄");
+        assert_eq!(document.lines()[1].content, "매우 짜증나");
+        assert_eq!(document.lines()[0].length, 11);
+        assert_eq!(document.lines()[1].length, 6);
+        
         assert_eq!(document.text(), "🙈我爱unicode🦄\n매우 짜증나");
 
         let chg = document.insert_untracked(&vec![
@@ -1463,19 +1563,29 @@ mod tests {
             "".chars().collect()
         ], &Position::from(1, 0));
         assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻✋🏻🖖🏻👌🏻\n⌚️📱📲💻⌨️\n매우 짜증나");
-
+        assert_eq!(document.lines()[0].length, 11);
+        assert_eq!(document.lines()[1].length, 12);
+        assert_eq!(document.lines()[2].length, 7);
+        assert_eq!(document.lines()[3].length, 6);
+        
         // Some emojis are two codepoints in a row...
         // We don't handle that. Nope.
         // (1, 6) is just after 👋🏻🤚🏻🖐🏻
         // (2, 3) is just after ⌚️📱
         let chg_2 = document.remove_untracked(&Range::from(1, 6, 2, 3));
         assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻📲💻⌨️\n매우 짜증나");
-
+        assert_eq!(document.lines()[0].length, 11);
+        assert_eq!(document.lines()[1].length, 10);
+        assert_eq!(document.lines()[2].length, 6);
+        
         chg_2.apply_untracked(&mut document);
         assert_eq!(document.text(), "🙈我爱unicode🦄\n👋🏻🤚🏻🖐🏻✋🏻🖖🏻👌🏻\n⌚️📱📲💻⌨️\n매우 짜증나");
 
         chg.apply_untracked(&mut document);
         assert_eq!(document.text(), "🙈我爱unicode🦄\n매우 짜증나");
+        assert_eq!(document.lines()[0].length, 11);
+        assert_eq!(document.lines()[1].length, 6);
+        
     }
 
     #[test]
@@ -1485,7 +1595,7 @@ mod tests {
         assert_eq!(
             document.remove_untracked(&Range::from(1, 2, 1, 2)),
             Change::Insert {
-                text: vec!["".chars().collect()],
+                text: vec!["".to_string()],
                 position: Position::from(1, 2)
             }
         );
@@ -1494,7 +1604,7 @@ mod tests {
         assert_eq!(
             document.remove_untracked(&Range::from(1, 2, 1, 4)),
             Change::Insert {
-                text: vec!["cd".chars().collect()],
+                text: vec!["cd".to_string()],
                 position: Position::from(1, 2)
             }
         );
@@ -1503,7 +1613,7 @@ mod tests {
         assert_eq!(
             document.remove_untracked(&Range::from(0, 4, 1, 1)),
             Change::Insert {
-                text: vec!["4".chars().collect(), "a".chars().collect()],
+                text: vec!["4".to_string(), "a".to_string()],
                 position: Position::from(0, 4)
             }
         );
@@ -1571,7 +1681,7 @@ mod tests {
 
     #[test]
     fn anchors() {
-        let mut document = Document::from("AAA\nBBB\nCCC");
+        let mut document = Document::from("🙈火A\n日BB\nCC魔");
         
         let a = document.create_anchor(&Anchor::from(0, 0)).unwrap();
         let b = document.create_anchor(&Anchor::from(0, 2)).unwrap();
@@ -1582,7 +1692,7 @@ mod tests {
         document.insert("Hello\nThere", &InsertOptions::exact_at(&Range::from(1, 0, 1, 0))).unwrap();
 
         document.checkpoint();
-        assert_eq!(document.text(), "AAA\nHello\nThereBBB\nCCC");
+        assert_eq!(document.text(), "🙈火A\nHello\nThere日BB\nCC魔");
         assert_eq!(document.anchor(a).unwrap().position, Position::from(0, 0));
         assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 2));
         assert_eq!(document.anchor(c).unwrap().position, Position::from(2, 6));
@@ -1595,7 +1705,7 @@ mod tests {
         assert_eq!(document.indentation, Indentation::tabs(2));
 
         document.remove(&RemoveOptions::exact_at(&Range::from(2, 5, 2, 6))).unwrap();
-        assert_eq!(document.text(), "AAA\nHello\nThereBB\nCCC");
+        assert_eq!(document.text(), "🙈火A\nHello\nThereBB\nCC魔");
         assert_eq!(document.anchor(a).unwrap().position, Position::from(0, 0));
         assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 2));
         assert_eq!(document.anchor(c).unwrap().position, Position::from(2, 5));
@@ -1606,7 +1716,7 @@ mod tests {
         document.remove(&RemoveOptions::exact_at(&Range::from(0, 1, 1, 0))).unwrap();
         document.remove_anchor(a).unwrap();
 
-        assert_eq!(document.text(), "AHello\nThereBB\nCCC");
+        assert_eq!(document.text(), "🙈Hello\nThereBB\nCC魔");
         assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 1));
         assert_eq!(document.anchor(c).unwrap().position, Position::from(1, 5));
         assert_eq!(document.anchor(d).unwrap().position, Position::from(1, 7));
@@ -1614,7 +1724,7 @@ mod tests {
         assert_eq!(document.anchor(f).unwrap().position, Position::from(2, 2));
         
         document.remove(&RemoveOptions::exact_at(&Range::from(1, 5, 2, 1))).unwrap();
-        assert_eq!(document.text(), "AHello\nThereCC");
+        assert_eq!(document.text(), "🙈Hello\nThereC魔");
         assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 1));
         assert_eq!(document.anchor(c).unwrap().position, Position::from(1, 5));
         assert_eq!(document.anchor(d).unwrap().position, Position::from(1, 5));
@@ -1624,7 +1734,7 @@ mod tests {
         
         document.undo(1).unwrap();
         assert_eq!(document.undo_redo().depth(), (1, 1));
-        assert_eq!(document.text(), "AAA\nHello\nThereBBB\nCCC");
+        assert_eq!(document.text(), "🙈火A\nHello\nThere日BB\nCC魔");
         assert_eq!(document.anchor(a).unwrap().position, Position::from(0, 0));
         assert_eq!(document.anchor(b).unwrap().position, Position::from(0, 2));
         assert_eq!(document.anchor(c).unwrap().position, Position::from(2, 6));
