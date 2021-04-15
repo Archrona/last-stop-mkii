@@ -1,4 +1,6 @@
 
+#![feature(test)]
+
 pub mod language;
 pub mod document;
 pub mod oops;

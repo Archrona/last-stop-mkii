@@ -1,5 +1,8 @@
 //! Support for intelligent parsing / understanding of source code
 
+
+extern crate test;
+
 use tree_sitter;
 use tree_sitter_rust;
 use tree_sitter_cpp;
@@ -40,7 +43,7 @@ pub fn get_parser(lang_str: &str) -> Option<tree_sitter::Parser> {
 fn pp_rec(node: &tree_sitter::Node, out: String, depth: i32, doc: &document::Document) -> String {
     let mut result = out;
 
-    for _ in 0..=depth {
+    for _ in 0..depth {
         result += "   ";
     }
 
@@ -69,3 +72,165 @@ fn pp_rec(node: &tree_sitter::Node, out: String, depth: i32, doc: &document::Doc
 pub fn pretty_print(node: &tree_sitter::Node, doc: &document::Document) -> String {
     pp_rec(node, String::new(), 0i32, doc)
 }
+
+
+
+
+
+
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use test::Bencher;
+
+    #[bench]
+    fn bench_doc_create(b: &mut Bencher) {
+        b.iter(|| {
+            let doc = document::Document::from(TESTCODE);
+            test::black_box(&doc);
+        });
+    }
+
+    #[bench]
+    fn bench_doc_text(b: &mut Bencher) {
+        let doc = document::Document::from(TESTCODE);
+
+        b.iter(|| {
+            test::black_box(&doc.text());
+        });
+    }
+
+    #[bench]
+    fn bench_ts_pprint(b: &mut Bencher) {
+        let mut parser = get_parser("rs").unwrap();
+        let doc = document::Document::from(TESTCODE);
+        let tree = parser.parse(doc.text(), None).unwrap();
+
+        b.iter(|| {
+            test::black_box(&pretty_print(&tree.root_node(), &doc));
+        });
+    }
+
+    #[bench]
+    fn bench_ts_parse(b: &mut Bencher) {
+        let mut parser = get_parser("rs").unwrap();
+        let doc = document::Document::from(TESTCODE);
+    
+        b.iter(|| {
+            let tree = parser.parse(doc.text(), None).unwrap();
+            test::black_box(&tree);
+        });
+        
+        //println!("{}", language::pretty_print(&tree.root_node(), &doc));
+    }
+
+    const TESTCODE: &str = r#"/// Sets anchor `handle` to `value`. Returns an `Err` if `handle` does not
+/// exist or if `value` points to an invalid position.
+pub fn set_anchor(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<(), Oops> {
+    if let None = self.anchors.get(handle) {
+        return Err(Oops::NonexistentAnchor(handle));
+    }
+    if !self.position_valid(&value.position) {
+        return Err(Oops::InvalidPosition(value.position, "set_anchor"));
+    }
+
+    let inverse = self.set_anchor_untracked(handle, value);
+    self.undo_redo.push_undo(inverse);
+
+    Ok(())
+}
+
+/// Creates a new anchor with contents `anchor`, returning its
+/// [`AnchorHandle`] or `Err` if the requested position is invalid.
+pub fn create_anchor(&mut self, anchor: &Anchor) -> Result<AnchorHandle, Oops> {
+    if !self.position_valid(&anchor.position) {
+        return Err(Oops::InvalidPosition(anchor.position, "create_anchor"));
+    }
+
+    let handle = self.anchors.get_new_handle();
+    let inverse = self.insert_anchor_untracked(handle, anchor);
+    self.undo_redo.push_undo(inverse);
+
+    Ok(handle)
+}
+
+/// Moves the cursor to `position`.
+pub fn set_cursor(&mut self, position: &Position) -> Result<(), Oops> {
+    self.set_anchor(Anchors::CURSOR, &Anchor {
+        position: *position,
+        ..*self.anchors.get(Anchors::CURSOR).unwrap()
+    })
+}
+
+/// Moves the mark to `position`.
+pub fn set_mark(&mut self, position: &Position) -> Result<(), Oops> {
+    self.set_anchor(Anchors::MARK, &Anchor {
+        position: *position,
+        ..*self.anchors.get(Anchors::MARK).unwrap()
+    })
+}
+
+/// Moves both cursor and mark to `position`.
+pub fn set_cursor_and_mark(&mut self, position: &Position) -> Result<(), Oops> {
+    self.set_cursor(position)?;
+    self.set_mark(position)?;
+    Ok(())
+}
+
+/// Moves the mark to the beginning of `range` and the cursor to the 
+/// end of `range`.
+pub fn set_selection(&mut self, range: &Range) -> Result<(), Oops> {
+    if !self.range_valid(range) {
+        Err(Oops::InvalidRange(*range, "set_selection"))
+    } else {
+        self.set_mark(&range.beginning)?;
+        self.set_cursor(&range.ending)?;
+        Ok(())
+    }
+}
+
+/// Removes the anchor at `handle`, or returns `Err` if invalid.
+pub fn remove_anchor(&mut self, handle: AnchorHandle) -> Result<(), Oops> {
+    if let None = self.anchors.get(handle) {
+        return Err(Oops::NonexistentAnchor(handle));
+    }
+
+    let inverse = self.remove_anchor_untracked(handle);
+
+    self.undo_redo.push_undo(inverse);
+    Ok(())
+}
+
+/// Sets the indentation policy of this document to `indentation`.
+/// Does not actually change the document's text!
+pub fn set_indentation(&mut self, indentation: &Indentation) -> Result<(), Oops> {
+    let inverse = self.set_indentation_untracked(indentation);
+    self.undo_redo.push_undo(inverse);
+    Ok(())
+}
+
+
+/// Undoes the most recently performed [`ChangePacket`], or returns error
+/// if there is nothing to undo.
+pub fn undo_once(&mut self) -> Result<(), Oops> {
+    match self.undo_redo.undo_stack.pop() {
+        None => Err(Oops::NoMoreUndos(0)),
+        Some(packet) => {
+            let mut redo_packet = ChangePacket::new();
+            for inverse in packet.changes.iter().rev() {
+                redo_packet.changes.push(inverse.apply_untracked(self));
+            }
+            
+            self.undo_redo.redo_stack.push(redo_packet);
+            Ok(())
+        }
+    }
+}
+"#;
+}
+
+

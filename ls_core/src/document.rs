@@ -8,6 +8,8 @@ use std::collections::hash_map;
 use regex::Regex;
 use lazy_static::lazy_static;
 use std::ops::{Bound, RangeBounds};
+use tree_sitter;
+use crate::language;
 
 
 //-----------------------------------------------------------------------------
@@ -119,7 +121,11 @@ pub enum Change {
     AnchorRemove { handle: AnchorHandle },
 
     /// Represents a change to the indentation policy.
-    IndentationChange { value: Indentation }
+    IndentationChange { value: Indentation },
+
+    /// Represents a change in the document's language string.
+    LanguageChange { value: String },
+
 }
 
 /// A series of [`Change`] to be applied as a group.
@@ -221,12 +227,15 @@ pub struct Line {
 ///
 /// The [`Document`] is central to ls_core. Clients of ls_core are likely
 /// to spend much of their time working with this type.
-#[derive(Clone, Debug)]
 pub struct Document {
     lines: Vec<Line>,
     anchors: Anchors,
     indentation: Indentation,
-    undo_redo: UndoRedoStacks
+    undo_redo: UndoRedoStacks,
+
+    language: String,
+    parser: Option<tree_sitter::Parser>,
+    tree: Option<tree_sitter::Tree>
 }
 
 
@@ -573,7 +582,8 @@ impl Change {
             AnchorSet { handle, value } =>      document.set_anchor_untracked(*handle, value),
             AnchorInsert { handle, value } =>   document.insert_anchor_untracked(*handle, value),
             AnchorRemove { handle } =>          document.remove_anchor_untracked(*handle),
-            IndentationChange { value } =>      document.set_indentation_untracked(value)
+            IndentationChange { value } =>      document.set_indentation_untracked(value),
+            LanguageChange { value } =>         document.set_language_untracked(&value)
         }
     }
     
@@ -671,7 +681,10 @@ impl Document {
             lines: vec![Line::from(String::from(""))],
             anchors: Anchors::new(),
             indentation: Indentation::spaces(4),
-            undo_redo: UndoRedoStacks::new()
+            undo_redo: UndoRedoStacks::new(),
+            language: String::from(""),
+            parser: None,
+            tree: None
         }
     }
 
@@ -708,10 +721,19 @@ impl Document {
 
         Document { 
             lines,
-            anchors: Anchors::new(),
-            indentation: Indentation::spaces(4),
-            undo_redo: UndoRedoStacks::new()
+            ..Document::new()
         }
+    }
+
+    /// Returns a document initialized from `text` with language `language`,
+    /// which can be either a file name extension or a string representing the
+    /// language's name.
+    /// 
+    /// See [`Document::from`].
+    pub fn from_with_language(text: &str, language: &str) -> Document {
+        let mut document = Document::from(text);
+        document.set_language_untracked(language);
+        document
     }
 
     /// Returns whether `position` is legal in this document. If a line contains 5
@@ -902,6 +924,27 @@ impl Document {
         }
     }
 
+    /// Returns the parse tree of the document as a `String`, or `None` if
+    /// the document could not be parsed. 
+    ///
+    /// This function does not trigger a parse tree update, but it does perform
+    /// expensive string formatting, so do not call it in performance-critical code!
+    /// 
+    /// The output will appear like this:
+    /// ```txt
+    /// source_file (0.0 - 0.10) "use hello;"
+    ///    use_declaration (0.0 - 0.10) "use hello;"
+    ///       use (0.0 - 0.3) "use"
+    ///       identifier (0.4 - 0.9) "hello"
+    ///       ; (0.9 - 0.10) ";"
+    /// ```
+    pub fn parse_tree_pretty_print(&self) -> Option<String> {
+        match &self.tree {
+            None => None,
+            Some(tree) => Some(language::pretty_print(&tree.root_node(), self))
+        }
+    }
+
     /// Returs a `Vec<String>` prepared for insertion from `text`, a `&str`,
     /// under insert options `options` at `position`.
     #[allow(unused_variables)]
@@ -1047,9 +1090,11 @@ impl Document {
             let inverse = change.apply_untracked(self);
             self.undo_redo.push_undo(inverse);
         }
-            
+
         Ok(())
     }
+
+    
     
     /// Sets anchor `handle` to `value`. Returns an `Err` if `handle` does not
     /// exist or if `value` points to an invalid position.
@@ -1135,7 +1180,37 @@ impl Document {
         self.undo_redo.push_undo(inverse);
         Ok(())
     }
-    
+
+    /// Sets the language of this document to `language` and rebuilds the parse tree.
+    pub fn set_language(&mut self, language: &str) -> Result<(), Oops> {
+        let inverse = self.set_language_untracked(language);
+        self.undo_redo.push_undo(inverse);
+        Ok(())
+    }
+
+    /// Update the parse tree for this document, acquiring a new parser if necessary.
+    /// This function will never fail, but might leave the document with no parse tree.
+    pub fn update_parse(&mut self) -> () {
+        if self.parser.is_none() {
+            self.parser = language::get_parser(&self.language);
+            if self.parser.is_none() {
+                self.tree = None;
+                return ();
+            }
+        }
+        
+        // At this point, we have a parser. We just need to update the tree
+        let text = self.text();
+        if let Some(p) = &mut self.parser {
+            let new_tree = p.parse(text, None); /*match &self.tree {
+                None => None,
+                Some(tree) => Some(&tree)
+            });*/
+            self.tree = new_tree;
+        }
+        
+        ()
+    }
 
     /// Undoes the most recently performed [`ChangePacket`], or returns error
     /// if there is nothing to undo.
@@ -1261,6 +1336,8 @@ impl Document {
             self.lines[position.row + text.len() - 1].length += after.chars().count();
         }
 
+        self.update_parse();
+
         Change::Remove { range: Range {
             beginning: *position,
             ending: Position { 
@@ -1294,6 +1371,8 @@ impl Document {
                 )
             );
 
+            self.update_parse();
+
             Change::Insert {
                 text: vec![original],
                 position: range.beginning
@@ -1325,6 +1404,8 @@ impl Document {
                     .drain((range.beginning.row + 1)..= range.ending.row)
                     .map(|x| x.content)
             );
+
+            self.update_parse();
 
             Change::Insert {
                 text: lines,
@@ -1368,6 +1449,18 @@ impl Document {
         
         reverse
     }
+
+    /// Sets the language string for this document, rebuilding the current parse tree
+    /// under the new language.
+    fn set_language_untracked(&mut self, language: &str) -> Change {
+        let reverse = Change::LanguageChange { value: String::from(&self.language) };
+        self.language = String::from(language);
+        self.parser = None;
+        self.tree = None;
+        self.update_parse();
+        reverse
+    }
+
 
     /// Asserts that a position is valid.
     ///
@@ -1681,7 +1774,7 @@ mod tests {
 
     #[test]
     fn anchors() {
-        let mut document = Document::from("🙈火A\n日BB\nCC魔");
+        let mut document = Document::from_with_language("🙈火A\n日BB\nCC魔", "rs");
         
         let a = document.create_anchor(&Anchor::from(0, 0)).unwrap();
         let b = document.create_anchor(&Anchor::from(0, 2)).unwrap();
@@ -1743,6 +1836,67 @@ mod tests {
         assert_eq!(document.anchor(f).unwrap().position, Position::from(3, 2));
 
         assert_eq!(document.indentation, Indentation::spaces(4));
+    }
+
+    #[test]
+    fn parsing() {
+        let mut document = Document::from_with_language("use hello;", "rs");
+        assert_eq!(
+            document.parse_tree_pretty_print().unwrap(),
+r#"source_file (0.0 - 0.10) "use hello;"
+   use_declaration (0.0 - 0.10) "use hello;"
+      use (0.0 - 0.3) "use"
+      identifier (0.4 - 0.9) "hello"
+      ; (0.9 - 0.10) ";"
+"#);
+
+        document.checkpoint();
+        document.set_cursor_and_mark(&Position::from(0, 9)).unwrap();
+        document.insert("::world", &InsertOptions::exact()).unwrap();
+
+        assert_eq!(
+            document.parse_tree_pretty_print().unwrap(),
+r#"source_file (0.0 - 0.17) "use hello::world;"
+   use_declaration (0.0 - 0.17) "use hello::world;"
+      use (0.0 - 0.3) "use"
+      scoped_identifier (0.4 - 0.16) "hello::world"
+         identifier (0.4 - 0.9) "hello"
+         :: (0.9 - 0.11) "::"
+         identifier (0.11 - 0.16) "world"
+      ; (0.16 - 0.17) ";"
+"#);
+
+        document.undo(1).unwrap();
+        assert_eq!(
+            document.parse_tree_pretty_print().unwrap(),
+r#"source_file (0.0 - 0.10) "use hello;"
+   use_declaration (0.0 - 0.10) "use hello;"
+      use (0.0 - 0.3) "use"
+      identifier (0.4 - 0.9) "hello"
+      ; (0.9 - 0.10) ";"
+"#);
+
+        document.checkpoint();
+        document.set_language("js").unwrap();
+        assert_eq!(
+            document.parse_tree_pretty_print().unwrap(),
+r#"program (0.0 - 0.10) "use hello;"
+   ERROR (0.0 - 0.3) "use"
+      identifier (0.0 - 0.3) "use"
+   expression_statement (0.4 - 0.10) "hello;"
+      identifier (0.4 - 0.9) "hello"
+      ; (0.9 - 0.10) ";"
+"#);
+        
+        document.undo(1).unwrap();
+        assert_eq!(
+            document.parse_tree_pretty_print().unwrap(),
+r#"source_file (0.0 - 0.10) "use hello;"
+   use_declaration (0.0 - 0.10) "use hello;"
+      use (0.0 - 0.3) "use"
+      identifier (0.4 - 0.9) "hello"
+      ; (0.9 - 0.10) ";"
+"#);
     }
 
 }
