@@ -765,7 +765,7 @@ impl Document {
             undo_redo: UndoRedoStacks::new(),
             language: String::from(""),
             parser: None,
-            tree: None
+            tree: None,
         }
     }
 
@@ -1308,7 +1308,7 @@ impl Document {
 
     /// Update the parse tree for this document, acquiring a new parser if necessary.
     /// This function will never fail, but might leave the document with no parse tree.
-    pub fn update_parse(&mut self) -> () {
+    pub fn update_parse_all(&mut self) -> () {
         if self.parser.is_none() {
             self.parser = language::get_parser(&self.language);
             if self.parser.is_none() {
@@ -1319,15 +1319,43 @@ impl Document {
         
         // At this point, we have a parser. We just need to update the tree
         let text = self.text();
+
         if let Some(p) = &mut self.parser {
-            let new_tree = p.parse(text, None); /*match &self.tree {
-                None => None,
-                Some(tree) => Some(&tree)
-            });*/
+            let new_tree = p.parse(&text, None);
             self.tree = new_tree;
         }
-        
-        ()
+    }
+
+    pub fn update_parse_region(&mut self, ie: &tree_sitter::InputEdit) -> () {
+        if self.parser.is_none() || self.tree.is_none() {
+            self.update_parse_all();
+        } 
+        else {
+            let text = self.text();
+
+            let new_tree = if let Some(tree) = &mut self.tree {
+                if let Some(parser) = &mut self.parser {
+                    tree.edit(ie);
+                    parser.parse(&text, Some(tree))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            match new_tree {
+                None => {
+                    self.tree = None;
+                    self.parser = None;
+                },
+                Some(_) => {
+                    self.tree = new_tree;
+                }
+            }
+
+            ()
+        }
     }
 
     /// Undoes the most recently performed [`ChangePacket`], or returns error
@@ -1454,7 +1482,52 @@ impl Document {
             self.lines[position.row + text.len() - 1].length += after.chars().count();
         }
 
-        self.update_parse();
+        // Tree sitter input edit setup
+
+        let preceding_line_bytes = self.lines
+            .iter()
+            .take(position.row)
+            .fold(0, |acc, x| acc + x.content.len() + 1);
+
+        let prefix_bytes = util::cp_index_to_byte(
+            &self.lines[position.row].content, position.column).unwrap();
+
+        let start_byte = preceding_line_bytes + prefix_bytes;
+        
+        let body_lines_bytes = text
+            .iter()
+            .fold(0, |acc, x| acc + x.len() + 1) - 1;
+
+        let end_byte = start_byte + body_lines_bytes;
+        
+        let end_column_bytes = 
+            if text.len() == 1 {
+                prefix_bytes + text[0].len()
+            } else {
+                text[text.len() - 1].len()
+            };
+
+        let ie = tree_sitter::InputEdit {
+            start_byte,
+            old_end_byte: start_byte,
+            new_end_byte: end_byte,
+            start_position: tree_sitter::Point { 
+                row: position.row,
+                column: prefix_bytes
+            },
+            old_end_position: tree_sitter::Point {
+                row: position.row,
+                column: prefix_bytes
+            },
+            new_end_position: tree_sitter::Point {
+                row: position.row + text.len() - 1,
+                column: end_column_bytes
+            }
+        };
+
+        //println!("{:?}", &ie);
+
+        self.update_parse_region(&ie);
 
         Change::Remove { range: Range {
             beginning: *position,
@@ -1489,7 +1562,7 @@ impl Document {
                 )
             );
 
-            self.update_parse();
+            self.update_parse_all();
 
             Change::Insert {
                 text: vec![original],
@@ -1524,7 +1597,7 @@ impl Document {
                     .map(|x| x.content)
             );
 
-            self.update_parse();
+            self.update_parse_all();
 
             Change::Insert {
                 text: lines,
@@ -1576,7 +1649,7 @@ impl Document {
         self.language = String::from(language);
         self.parser = None;
         self.tree = None;
-        self.update_parse();
+        self.update_parse_all();
         reverse
     }
 
@@ -1690,7 +1763,7 @@ mod tests {
         let mut document = Document::from("AAA\nBBB");
         
         assert_eq!(document.insert_untracked(
-            &vec!["hello".chars().collect()],
+            &vec!["hello".to_string()],
             &Position { row: 0, column: 0 }
         ), Change::Remove { range: Range {
             beginning: Position { row: 0, column: 0 },
@@ -1699,7 +1772,7 @@ mod tests {
         assert_eq!(document.text(), "helloAAA\nBBB");
         
         assert_eq!(document.insert_untracked(
-            &vec!["there".chars().collect(), "friend".chars().collect()],
+            &vec!["there".to_string(), "friend".to_string()],
             &Position { row: 1, column: 2 }
         ), Change::Remove { range: Range {
             beginning: Position { row: 1, column: 2 },
@@ -1708,7 +1781,7 @@ mod tests {
         assert_eq!(document.text(), "helloAAA\nBBthere\nfriendB");
 
         document.insert_untracked(
-            &vec!["ly".chars().collect()],
+            &vec!["ly".to_string()],
             &Position { row: 2, column: 7 }
         );
         assert_eq!(document.text(), "helloAAA\nBBthere\nfriendBly");
@@ -1977,9 +2050,9 @@ r#"source_file (0.0 - 0.10) "use hello;"
     fn chains() {
         let document = Document::from_with_language(
 r#"
-pub fn isPrime(x: u32) -> bool { 
-    for k in 2..x {
-        if x % k == 0 {
+pub fn isPrime(ᚡ: u32) -> bool { 
+    for ぷ in 2..ᚡ {
+        if ᚡ % ぷ == 0 {
             return false;
         }
     }

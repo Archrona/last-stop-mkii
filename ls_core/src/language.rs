@@ -155,6 +155,50 @@ string_content (3, 13)-(3, 18)
         //println!("{}", language::pretty_print(&tree.root_node(), &doc));
     }
 
+    fn insert_times(n: usize) {
+        let mut doc = document::Document::from_with_language("", "rs");
+        doc.insert("fn test() {\n\n}\n", &document::InsertOptions::exact()).unwrap();
+        doc.set_cursor_and_mark(&document::Position::from(1, 0)).unwrap();
+        for i in 0..n {
+            doc.insert("    let x = 10;\n", &document::InsertOptions::exact()).unwrap();
+        }
+    }
+
+    #[bench]
+    fn bench_insert_010(b: &mut Bencher) {
+        b.iter(|| {
+            insert_times(10);
+        });
+    }
+
+    #[bench]
+    fn bench_insert_020(b: &mut Bencher) {
+        b.iter(|| {
+            insert_times(20);
+        });
+    }
+
+    #[bench]
+    fn bench_insert_050(b: &mut Bencher) {
+        b.iter(|| {
+            insert_times(50);
+        });
+    }
+
+    #[bench]
+    fn bench_insert_100(b: &mut Bencher) {
+        b.iter(|| {
+            insert_times(100);
+        });
+    }
+
+    #[bench]
+    fn bench_insert_200(b: &mut Bencher) {
+        b.iter(|| {
+            insert_times(200);
+        });
+    }
+
     const TESTCODE: &str = r#"/// Sets anchor `handle` to `value`. Returns an `Err` if `handle` does not
 /// exist or if `value` points to an invalid position.
 pub fn set_anchor(&mut self, handle: AnchorHandle, value: &Anchor) -> Result<(), Oops> {
