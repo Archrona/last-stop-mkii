@@ -189,12 +189,14 @@ pub struct Anchors {
     next_id: AnchorHandle
 }
 
+/// Represents a contextual region within a document.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ChainRegion {
     pub kind: String,
     pub range: Range
 }
 
+/// Represents a series of nested contextual regions within a document.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Chain {
     pub regions: Vec<ChainRegion>
@@ -574,6 +576,7 @@ impl Anchors {
 }
 
 impl ChainRegion {
+    /// Returns the `ChainRegion` with the given `kind` and `range`.
     pub fn from(kind: &str, range: &Range) -> ChainRegion {
         ChainRegion {
             kind: String::from(kind),
@@ -583,6 +586,7 @@ impl ChainRegion {
 }
 
 impl fmt::Display for ChainRegion {
+    /// Formats a `ChainRegion` for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -597,12 +601,18 @@ impl fmt::Display for ChainRegion {
 }
 
 impl Chain {
+    /// Returns a new, empty `Chain`.
     pub fn new() -> Chain {
         Chain {
             regions: vec![]
         }
     }
     
+    /// Pushes a new region onto a `Chain`. Corrects tree sitter's byte ranges
+    /// into ls_core's Unicode codepoint indices.
+    /// 
+    /// # Panics
+    /// Will panic if the byte indices are invalid.
     pub fn push(&mut self, kind: &str, range: tree_sitter::Range, doc: &Document) -> () {
         self.regions.push(ChainRegion::from(
             kind,
@@ -624,6 +634,7 @@ impl Chain {
 }
 
 impl fmt::Display for Chain {
+    /// Formats a `Chain` for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { 
         for c in &self.regions {
             write!(f, "{}\n", &c)?;
@@ -1017,7 +1028,12 @@ impl Document {
     }
 
 
-
+    /// Returns a [`Chain`] of [`ChainRegion`]s encompassing the given `position`
+    /// in this document, or an [`Oops`] if either the position is invalid
+    /// or this document has no parse tree.
+    /// 
+    /// This can be used to determine what nested structures surround
+    /// a certain position.
     pub fn get_context_at(&self, position: &Position) -> Result<Chain, Oops> {
         if !self.position_valid(position) {
             return Err(Oops::InvalidPosition(position.clone(), "get_context_at"));

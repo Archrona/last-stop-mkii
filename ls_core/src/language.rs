@@ -15,8 +15,10 @@ use lazy_static::lazy_static;
 
 use crate::document;
 
+extern "C" { fn tree_sitter_test() -> tree_sitter::Language; }
+
 lazy_static! {
-    static ref LANGUAGES: [(&'static str, tree_sitter::Language); 8] = {[
+    static ref LANGUAGES: Vec<(&'static str, tree_sitter::Language)> = vec![
         ("rs", tree_sitter_rust::language()),
         ("cpp", tree_sitter_cpp::language()),
         ("java", tree_sitter_java::language()),
@@ -24,8 +26,9 @@ lazy_static! {
         ("py", tree_sitter_python::language()),
         ("ts", tree_sitter_typescript::language_typescript()),
         ("tsx", tree_sitter_typescript::language_tsx()),
-        ("sh", tree_sitter_bash::language())
-    ]};
+        ("sh", tree_sitter_bash::language()),
+        ("test", unsafe { tree_sitter_test() })
+    ];
 }
 
 pub fn get_parser(lang_str: &str) -> Option<tree_sitter::Parser> {
@@ -87,6 +90,29 @@ pub fn pretty_print(node: &tree_sitter::Node, doc: &document::Document) -> Strin
 mod tests {
     use super::*;
     use test::Bencher;
+
+    #[test]
+    fn test_custom_parser() {
+        let doc = document::Document::from_with_language(
+r#"
+language Rust {
+    extension: "rs";
+    casing: "snake";
+    raw: false;
+    annoying: 1;
+}
+"#, "test");
+
+        assert_eq!(
+            format!("{}", doc.get_context_at(&document::Position::from(3, 15)).unwrap()),
+r#"source_file (1, 0)-(7, 0)
+language (1, 0)-(6, 1)
+pair (3, 4)-(3, 20)
+literal (3, 12)-(3, 19)
+string_literal (3, 12)-(3, 19)
+string_content (3, 13)-(3, 18)
+"#);
+    }
 
     #[bench]
     fn bench_doc_create(b: &mut Bencher) {
