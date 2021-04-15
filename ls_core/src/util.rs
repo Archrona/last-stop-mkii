@@ -67,3 +67,83 @@ pub fn slice(s: &str, range: impl RangeBounds<usize>) -> &str {
     } - start;
     substring(s, start, len)
 }
+
+/// Returns the utf-8 codepoint index corresponding to byte offset `byte`
+/// in string `s`, or `None` if the byte offset is out of range or not a valid
+/// UTF-8 character.
+/// 
+/// If `byte` is equal to the length of `s` in bytes, returns the number
+/// of characters in `s`. This is useful for anchor/cursor manipulations.
+/// 
+/// # Examples
+/// ```
+/// use ls_core::util::*;
+/// let s = "Ɣa🙈◧";  // hex: c6 94, 61, f0 9f 99 88, e2 97 a7
+/// assert_eq!(byte_index_to_cp(&s, 0), Some(0));
+/// assert_eq!(byte_index_to_cp(&s, 1), None);
+/// assert_eq!(byte_index_to_cp(&s, 2), Some(1));
+/// assert_eq!(byte_index_to_cp(&s, 3), Some(2));
+/// assert_eq!(byte_index_to_cp(&s, 4), None);
+/// assert_eq!(byte_index_to_cp(&s, 5), None);
+/// assert_eq!(byte_index_to_cp(&s, 6), None);
+/// assert_eq!(byte_index_to_cp(&s, 7), Some(3));
+/// assert_eq!(byte_index_to_cp(&s, 8), None);
+/// assert_eq!(byte_index_to_cp(&s, 9), None);
+/// assert_eq!(byte_index_to_cp(&s, 10), Some(4));
+/// ```
+pub fn byte_index_to_cp(s: &str, byte: usize) -> Option<usize> {
+    let mut cp_index = 0;
+
+    for (b, _) in s.char_indices() {
+        if b > byte {
+            return None;
+        } else if b == byte {
+            return Some(cp_index);
+        } else {
+            cp_index += 1;
+        }
+    }
+    
+    if byte == s.len() {
+        Some(cp_index)
+    } else {
+        None
+    }
+}
+
+/// Returns the byte index of the `cp`th unicode codepoint in `s`,
+/// or `None` if the supplied index is out of range.
+/// 
+/// If `cp` is equal to the length of `s` in chars, returns the number
+/// of bytes in `s`. This is useful for anchor/cursor manipulations.
+/// 
+/// # Examples
+/// ```
+/// use ls_core::util::*;
+/// let s = "Ɣa🙈◧";  // hex: c6 94, 61, f0 9f 99 88, e2 97 a7
+/// assert_eq!(cp_index_to_byte(&s, 0), Some(0));
+/// assert_eq!(cp_index_to_byte(&s, 1), Some(2));
+/// assert_eq!(cp_index_to_byte(&s, 2), Some(3));
+/// assert_eq!(cp_index_to_byte(&s, 3), Some(7));
+/// assert_eq!(cp_index_to_byte(&s, 4), Some(10));
+/// assert_eq!(cp_index_to_byte(&s, 5), None);
+/// ```
+pub fn cp_index_to_byte(s: &str, cp: usize) -> Option<usize> {
+    let mut cp_index = 0;
+
+    for (b, _) in s.char_indices() {
+        if cp_index > cp {
+            return None;
+        } else if cp_index == cp {
+            return Some(b);
+        } else {
+            cp_index += 1;
+        }
+    }
+    
+    if cp_index == cp {
+        Some(s.len())
+    } else {
+        None
+    }
+}
