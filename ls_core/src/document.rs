@@ -5,11 +5,11 @@
 
 use crate::util::Oops;
 use std::collections::hash_map;
-use regex::Regex;
-use lazy_static::lazy_static;
 use tree_sitter;
 use crate::language;
+use crate::util;
 use crate::util::{substring, slice};
+use std::fmt;
 
 //-----------------------------------------------------------------------------
 
@@ -187,6 +187,17 @@ pub type AnchorHandle = u32;
 pub struct Anchors {
     store: hash_map::HashMap<u32, Anchor>,
     next_id: AnchorHandle
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct ChainRegion {
+    pub kind: String,
+    pub range: Range
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct Chain {
+    pub regions: Vec<ChainRegion>
 }
 
 /// Maintains the undo and redo stacks for a [`Document`].
@@ -562,6 +573,66 @@ impl Anchors {
     }
 }
 
+impl ChainRegion {
+    pub fn from(kind: &str, range: &Range) -> ChainRegion {
+        ChainRegion {
+            kind: String::from(kind),
+            range: range.clone()
+        }
+    }
+}
+
+impl fmt::Display for ChainRegion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} ({}, {})-({}, {})",
+            self.kind,
+            self.range.beginning.row,
+            self.range.beginning.column,
+            self.range.ending.row,
+            self.range.ending.column
+        )
+    }
+}
+
+impl Chain {
+    pub fn new() -> Chain {
+        Chain {
+            regions: vec![]
+        }
+    }
+    
+    pub fn push(&mut self, kind: &str, range: tree_sitter::Range, doc: &Document) -> () {
+        self.regions.push(ChainRegion::from(
+            kind,
+            &Range::from(
+                range.start_point.row,
+                util::byte_index_to_cp(
+                    &doc.line(range.start_point.row).unwrap(),
+                    range.start_point.column
+                ).unwrap(),
+
+                range.end_point.row,
+                util::byte_index_to_cp(
+                    &doc.line(range.end_point.row).unwrap(),
+                    range.end_point.column
+                ).unwrap()
+            )
+        ));
+    }
+}
+
+impl fmt::Display for Chain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { 
+        for c in &self.regions {
+            write!(f, "{}\n", &c)?;
+        }
+
+        fmt::Result::Ok(())
+    }
+}
+
 impl Change {
     /// Performs a `Change` on `document`, returning the inverse change.
     ///
@@ -692,8 +763,7 @@ impl Document {
     /// and initializes them both to (0, 0).
     ///
     /// The resulting document is guaranteed to have at least one line, even if it is
-    /// just the empty line. Trailing newlines are stripped and the final empty line
-    /// is not included.
+    /// just the empty line.
     ///
     /// # Examples
     ///
@@ -705,17 +775,19 @@ impl Document {
     ///
     /// ```
     /// use ls_core::document::*;
-    /// let empty = Document::from("Hello\n  there!\n");
+    /// let empty = Document::from("\nHello\n  there!\n");
     /// assert_eq!(*empty.lines(), vec![
+    ///     Line::from("".to_string()),
     ///     Line::from("Hello".to_string()),
-    ///     Line::from("  there!".to_string())
+    ///     Line::from("  there!".to_string()),
+    ///     Line::from("".to_string())
     /// ]);
     /// ```
     pub fn from(text: &str) -> Document {
         let lines: Vec<Line> = if text == "" {
             vec![Line::from(String::new())]
         } else {
-            text.lines().map(|x| Line::from(String::from(x))).collect()
+            util::LINE_SPLIT.split(text).map(|x| Line::from(String::from(x))).collect()
         };
 
         Document { 
@@ -741,7 +813,7 @@ impl Document {
     /// # Examples
     /// ```
     /// use ls_core::document::*;
-    /// let document = Document::from("Hello\n  there!\n");
+    /// let document = Document::from("Hello\n  there!");
     /// assert_eq!(true, document.position_valid(&Position { row: 0, column: 0 }));
     /// assert_eq!(true, document.position_valid(&Position { row: 0, column: 5 }));
     /// assert_eq!(false, document.position_valid(&Position { row: 0, column: 6 }));
@@ -757,7 +829,7 @@ impl Document {
     /// # Examples
     /// ```
     /// use ls_core::document::*;
-    /// let document = Document::from("Hello\n  there!\n");
+    /// let document = Document::from("Hello\n  there!");
     ///
     /// let p_1 = Position { row: 0, column: 0 };
     /// let p_2 = Position { row: 0, column: 5 };
@@ -869,8 +941,8 @@ impl Document {
     pub fn text(&self) -> String {
         let mut result = String::new();
 
-        for line in &self.lines {
-            if result.len() > 0 {
+        for (i, line) in self.lines.iter().enumerate() {
+            if i > 0 {
                 result.push('\n');
             }
             result.push_str(&line.content);
@@ -944,6 +1016,41 @@ impl Document {
         }
     }
 
+
+
+    pub fn get_context_at(&self, position: &Position) -> Result<Chain, Oops> {
+        if !self.position_valid(position) {
+            return Err(Oops::InvalidPosition(position.clone(), "get_context_at"));
+        }
+        
+        if let None = self.tree {
+            return Err(Oops::CannotParse("get_context_at"));
+        }
+        
+        let b = util::cp_index_to_byte(&self.lines[position.row].content, position.column).unwrap();
+        let pt = tree_sitter::Point::new(position.row, b);
+        
+        let mut chain = Chain::new();
+        let mut node = self.tree.as_ref().unwrap().root_node();
+        
+        'outer: loop {
+            chain.push(node.kind(), node.range(), self);
+            
+            for i in 0..node.child_count() {
+                let child = node.child(i).unwrap();
+                let child_range = child.range();
+                if child_range.start_point <= pt && pt <= child_range.end_point {
+                    node = child;
+                    continue 'outer;
+                }
+            }
+            
+            break;
+        }
+        
+        Ok(chain)
+    }
+
     /// Returs a `Vec<String>` prepared for insertion from `text`, a `&str`,
     /// under insert options `options` at `position`.
     #[allow(unused_variables)]
@@ -952,13 +1059,9 @@ impl Document {
             todo!();
         }
         
-        lazy_static!{
-            static ref LINE_SPLIT: Regex = Regex::new(r"\r?\n").unwrap();
-        }
-        
         let mut lines: Vec<String> = vec![];
         
-        for line in LINE_SPLIT.split(text) {
+        for line in util::LINE_SPLIT.split(text) {
             lines.push(String::from(line));
         }
         
@@ -1854,4 +1957,50 @@ r#"source_file (0.0 - 0.10) "use hello;"
 "#);
     }
 
+    #[test]
+    fn chains() {
+        let document = Document::from_with_language(
+r#"
+pub fn isPrime(x: u32) -> bool { 
+    for k in 2..x {
+        if x % k == 0 {
+            return false;
+        }
+    }
+    true
+}
+"#,
+            "rs"
+        );
+
+        assert_eq!(
+            &format!("{}", document.get_context_at(&Position::from(9, 0)).unwrap()),
+r#"source_file (1, 0)-(9, 0)
+"#
+        );
+
+        assert_eq!(
+            &format!("{}", document.get_context_at(&Position::from(4, 15)).unwrap()),
+r#"source_file (1, 0)-(9, 0)
+function_item (1, 0)-(8, 1)
+block (1, 31)-(8, 1)
+for_expression (2, 4)-(6, 5)
+block (2, 18)-(6, 5)
+if_expression (3, 8)-(5, 9)
+block (3, 22)-(5, 9)
+return_expression (4, 12)-(4, 24)
+return (4, 12)-(4, 18)
+"#
+        );
+
+        assert_eq!(
+            &format!("{}", document.get_context_at(&Position::from(1, 21)).unwrap()),
+r#"source_file (1, 0)-(9, 0)
+function_item (1, 0)-(8, 1)
+parameters (1, 14)-(1, 22)
+parameter (1, 15)-(1, 21)
+primitive_type (1, 18)-(1, 21)
+"#
+        );
+    }
 }

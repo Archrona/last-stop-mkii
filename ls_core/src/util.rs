@@ -5,6 +5,12 @@
 
 use crate::document;
 use std::ops::{Bound, RangeBounds};
+use lazy_static::lazy_static;
+use regex::Regex;
+
+lazy_static!{
+    pub static ref LINE_SPLIT: Regex = Regex::new(r"\r?\n").unwrap();
+}
 
 /// Represents a structured failure type.
 /// Typical usage is to return `Result<T, Oops>`.
@@ -18,14 +24,15 @@ pub enum Oops {
     InvalidIndex(usize, &'static str),
     InvalidPosition(document::Position, &'static str),
     InvalidRange(document::Range, &'static str),
-    EmptyString(&'static str)
+    EmptyString(&'static str),
+    CannotParse(&'static str),
 }
 
 /// Returns the substring of `s` starting at Unicode codepoint index `start`
 /// and extending for `len` codepoints.
 /// 
 /// Adapted from: carlomilanesi
-/// https://users.rust-lang.org/t/how-to-get-a-substring-of-a-string/1351/11
+/// <https://users.rust-lang.org/t/how-to-get-a-substring-of-a-string/1351/11>
 pub fn substring(s: &str, start: usize, len: usize) -> &str {
     let mut char_pos = 0;
     let mut byte_start = 0;
@@ -54,7 +61,7 @@ pub fn substring(s: &str, start: usize, len: usize) -> &str {
 /// Returns the slice of `s` given by Unicode codepoint indices `range`.
 /// 
 /// Adapted from: carlomilanesi
-/// https://users.rust-lang.org/t/how-to-get-a-substring-of-a-string/1351/11
+/// <https://users.rust-lang.org/t/how-to-get-a-substring-of-a-string/1351/11>
 pub fn slice(s: &str, range: impl RangeBounds<usize>) -> &str {
     let start = match range.start_bound() {
         Bound::Included(bound) | Bound::Excluded(bound) => *bound,
@@ -90,6 +97,9 @@ pub fn slice(s: &str, range: impl RangeBounds<usize>) -> &str {
 /// assert_eq!(byte_index_to_cp(&s, 8), None);
 /// assert_eq!(byte_index_to_cp(&s, 9), None);
 /// assert_eq!(byte_index_to_cp(&s, 10), Some(4));
+/// 
+/// let s2 = "pub fn isPrime(x: u32) -> bool { ";
+/// assert_eq!(byte_index_to_cp(&s2, 31), Some(31));
 /// ```
 pub fn byte_index_to_cp(s: &str, byte: usize) -> Option<usize> {
     let mut cp_index = 0;
