@@ -3,14 +3,13 @@
 //! Supports advanced language features, parsing, and many other useful features
 //! that enable speech coding.
 
-use crate::oops::Oops;
+use crate::util::Oops;
 use std::collections::hash_map;
 use regex::Regex;
 use lazy_static::lazy_static;
-use std::ops::{Bound, RangeBounds};
 use tree_sitter;
 use crate::language;
-
+use crate::util::{substring, slice};
 
 //-----------------------------------------------------------------------------
 
@@ -1358,15 +1357,15 @@ impl Document {
         self.assert_range_valid(range);
 
         if range.beginning.row == range.ending.row {
-            let original = self.lines[range.beginning.row].content.substring(
+            let original = substring(&self.lines[range.beginning.row].content,
                 range.beginning.column, range.ending.column - range.beginning.column
             ).to_string();
 
             self.lines[range.beginning.row] = Line::from(
-                self.lines[range.beginning.row].content.slice(
+                slice(&self.lines[range.beginning.row].content,
                     ..range.beginning.column
                 ).to_string() +
-                &self.lines[range.beginning.row].content.slice(
+                &slice(&self.lines[range.beginning.row].content,
                     range.ending.column..
                 )
             );
@@ -1381,19 +1380,20 @@ impl Document {
             let mut lines: Vec<String> = Vec::new();
 
             lines.push(
-                self.lines[range.beginning.row].content.slice(range.beginning.column..).to_string()
+                slice(&self.lines[range.beginning.row].content, range.beginning.column..).to_string()
             );
 
-            self.lines[range.beginning.row].content = self.lines[range.beginning.row].content.substring(
+            self.lines[range.beginning.row].content = substring(
+                &self.lines[range.beginning.row].content,
                 0, range.beginning.column
             ).to_string();
 
-            let trailing = self.lines[range.ending.row].content
-                .slice(range.ending.column..)
+            let trailing = slice(&self.lines[range.ending.row].content, range.ending.column..)
                 .to_string();
 
-            self.lines[range.ending.row].content = 
-                self.lines[range.ending.row].content.substring(0, range.ending.column).to_string();
+            self.lines[range.ending.row].content = substring(
+                &self.lines[range.ending.row].content, 0, range.ending.column
+            ).to_string();
 
             self.lines[range.beginning.row].content += &trailing;
             self.lines[range.beginning.row].length = 
@@ -1519,52 +1519,7 @@ pub fn push_all_at<T>(v: &mut Vec<T>, mut offset: usize, s: &[T]) where T: Clone
     }
 }
 
-/// Author: carlomilanesi
-/// https://users.rust-lang.org/t/how-to-get-a-substring-of-a-string/1351/11
-trait StringUtils {
-    fn substring(&self, start: usize, len: usize) -> &str;
-    fn slice(&self, range: impl RangeBounds<usize>) -> &str;
-}
 
-impl StringUtils for str {
-    fn substring(&self, start: usize, len: usize) -> &str {
-        let mut char_pos = 0;
-        let mut byte_start = 0;
-        let mut it = self.chars();
-        loop {
-            if char_pos == start { break; }
-            if let Some(c) = it.next() {
-                char_pos += 1;
-                byte_start += c.len_utf8();
-            }
-            else { break; }
-        }
-        char_pos = 0;
-        let mut byte_end = byte_start;
-        loop {
-            if char_pos == len { break; }
-            if let Some(c) = it.next() {
-                char_pos += 1;
-                byte_end += c.len_utf8();
-            }
-            else { break; }
-        }
-        &self[byte_start..byte_end]
-    }
-
-    fn slice(&self, range: impl RangeBounds<usize>) -> &str {
-        let start = match range.start_bound() {
-            Bound::Included(bound) | Bound::Excluded(bound) => *bound,
-            Bound::Unbounded => 0,
-        };
-        let len = match range.end_bound() {
-            Bound::Included(bound) => *bound + 1,
-            Bound::Excluded(bound) => *bound,
-            Bound::Unbounded => self.len(),
-        } - start;
-        self.substring(start, len)
-    }
-}
 
 
 //-----------------------------------------------------------------------------

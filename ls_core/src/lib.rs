@@ -3,7 +3,7 @@
 
 pub mod language;
 pub mod document;
-pub mod oops;
+pub mod util;
 
 use wasm_bindgen::prelude::*;
 
